@@ -25,7 +25,7 @@ from src.data_loader import (
     parse_nabis_inventory_export,
 )
 from src.cashflow_engine import generate_13_week_forecast, calculate_cash_runway_metrics
-from src.inventory_engine import compute_inventory_health
+from src.inventory_engine import compute_inventory_health, aggregate_inventory_by_sku
 from src.qbo_client import QuickBooksClient, parse_qbo_pnl_export, parse_qbo_balance_sheet
 
 LOGO_PATH = os.path.join(BASE_DIR, "assets", "logo.webp")
@@ -249,7 +249,7 @@ tab_overview, tab_cashflow, tab_nabis, tab_inventory, tab_pnl, tab_upload = st.t
     "📊 Executive Overview",
     "💵 13-Week Cash Flow Model",
     "📦 Nabis Wholesale & Fees",
-    "📈 Inventory & Reorder Monitor",
+    "📈 Inventory & SKU Monitor",
     "📑 P&L & Royalty Tracking",
     "📤 Data Upload & Sync Portal",
 ])
@@ -418,16 +418,18 @@ with tab_overview:
             unsafe_allow_html=True,
         )
     with col_ins2:
-        # Check lowest inventory
-        inv_eval = compute_inventory_health(st.session_state.inventory_df)
-        critical_items = inv_eval[inv_eval["inventory_status"].str.contains("Critical|Reorder Now")]
+        # Evaluate active commercial inventory health at aggregate SKU level
+        agg_inv = aggregate_inventory_by_sku(st.session_state.inventory_df)
+        active_skus = agg_inv[(agg_inv["units_available"] > 0) & (~agg_inv["is_sample"])] if not agg_inv.empty else pd.DataFrame()
+        critical_items = active_skus[active_skus["inventory_status"].str.contains("Critical|Reorder Now")] if not active_skus.empty else pd.DataFrame()
         if not critical_items.empty:
             crit_names = ", ".join(critical_items["product_name"].head(2).tolist())
+            min_woh = critical_items["weeks_of_supply"].min()
             st.markdown(
                 f"""
                 <div class="danger-banner">
                     <b>⚠️ Inventory Reorder Alert</b><br>
-                    <b>{len(critical_items)} SKU(s)</b> ({crit_names}) have reached their reorder lead-time threshold. New production batches should be initiated to avoid stockouts.
+                    <b>{len(critical_items)} SKU(s)</b> ({crit_names}) have reached their reorder lead-time threshold (<b>{min_woh:.1f} weeks</b> supply remaining). New manufacturing batches should be scheduled to prevent stockouts.
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -436,8 +438,8 @@ with tab_overview:
             st.markdown(
                 """
                 <div class="alert-banner" style="border-left-color: #28a745; background-color: #e8f5e9; color: #1b5e20;">
-                    <b>✅ Inventory Levels Stable</b><br>
-                    All current SKUs have adequate Days of Supply (DOH) relative to manufacturing lead-time buffers.
+                    <b>✅ Commercial Inventory Levels Stable</b><br>
+                    All active commercial SKUs have adequate Days of Supply (DOH) relative to manufacturing lead-time buffers.
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -746,112 +748,316 @@ with tab_nabis:
 
 
 # -----------------------------------------------------------------------------
-# TAB 4: INVENTORY & PRODUCTION REORDER MONITOR
+# TAB 4: INVENTORY & SKU MONITOR
 # -----------------------------------------------------------------------------
 with tab_inventory:
-    st.subheader("Inventory Monitor & Manufacturing Reorder Triggers")
-    st.markdown("Track stock across Nabis Oakland & Los Angeles hubs with automated Days of Supply (DOH) calculations.")
-    
-    # Lead time settings
-    inv_col_s1, inv_col_s2, inv_col_s3 = st.columns(3)
-    with inv_col_s1:
-        lead_time_val = st.slider("Production Lead Time (Weeks)", min_value=2, max_value=10, value=5)
-    with inv_col_s2:
-        safety_stock_val = st.slider("Safety Stock Buffer (Weeks)", min_value=1, max_value=6, value=2)
-    with inv_col_s3:
-        st.markdown(f"**Total Reorder Lead Horizon:** **{lead_time_val + safety_stock_val} Weeks**")
-        st.caption("Reorder must be initiated before stock dips into this buffer.")
-
-    # Evaluate Inventory Health
-    current_inv = compute_inventory_health(
-        st.session_state.inventory_df,
-        lead_time_weeks=lead_time_val,
-        safety_stock_weeks=safety_stock_val,
+    st.subheader("📦 Auntie Aloha SKU Inventory & Warehouse Depletion Monitor")
+    st.markdown(
+        "Real-time visibility across all commercial SKUs and production batches housed at **Nabis Woodlake Distribution Hub**. Track stock counts, weekly depletion velocities, days of supply, and automated manufacturing reorder dates."
     )
-    
-    # Summary Metrics Row
-    tot_units_avail = current_inv["units_available"].sum()
-    tot_cogs_val = current_inv["cogs_valuation"].sum()
-    tot_whs_val = current_inv["wholesale_valuation"].sum()
-    
-    im1, im2, im3, im4 = st.columns(4)
-    im1.metric("Available Units in Stock", f"{int(tot_units_avail):,} Units")
-    im2.metric("Inventory Cost Valuation", f"${tot_cogs_val:,.2f}")
-    im3.metric("Wholesale Market Value", f"${tot_whs_val:,.2f}")
-    im4.metric("Avg Days of Supply (DOH)", f"{current_inv['days_of_supply'].mean():.1f} Days")
+
+    # Top Control & Filter Bar
+    with st.expander("⚙️ Production Planning & SKU Filter Settings", expanded=True):
+        fcol1, fcol2, fcol3, fcol4 = st.columns([1.5, 1.2, 1.2, 1.1])
+        with fcol1:
+            view_mode = st.radio(
+                "View Mode",
+                ["📊 Consolidated by SKU", "📦 Batch & Lot Expiration Detail"],
+                horizontal=True,
+                help="Switch between aggregate SKU health and individual production batch lot tracking."
+            )
+        with fcol2:
+            cat_filter = st.selectbox(
+                "Filter by Category",
+                ["All Categories", "Gummies - Solventless Rosin", "Gummies - Distillate"],
+            )
+        with fcol3:
+            stock_filter = st.selectbox(
+                "Filter by Stock Status",
+                ["Active Stock (> 0 Units)", "All SKUs (Including Depleted)", "Depleted / Out of Stock"],
+            )
+        with fcol4:
+            include_samples = st.checkbox("Include Sample SKUs ($0.01)", value=False, help="Show promotional sample units")
+
+        # Lead Time & Buffer Sliders
+        scol1, scol2, scol3 = st.columns(3)
+        with scol1:
+            lead_time_val = st.slider("Manufacturing Lead Time (Weeks)", min_value=2, max_value=12, value=5, help="Lead time required by Smoakland or MyGreen Network to produce a batch.")
+        with scol2:
+            safety_stock_val = st.slider("Safety Stock Buffer (Weeks)", min_value=1, max_value=8, value=2, help="Buffer weeks to absorb sudden retail demand surges.")
+        with scol3:
+            total_lead_horizon = lead_time_val + safety_stock_val
+            st.metric("Total Reorder Horizon", f"{total_lead_horizon} Weeks", help=f"Orders must be scheduled when stock reaches {total_lead_horizon} weeks of supply.")
+
+    # Prepare base data
+    raw_inv_df = st.session_state.inventory_df.copy()
+    if not include_samples:
+        raw_inv_df = raw_inv_df[~raw_inv_df["is_sample"]]
+
+    # Category filter
+    if cat_filter != "All Categories":
+        raw_inv_df = raw_inv_df[raw_inv_df["category"] == cat_filter]
+
+    # Evaluate health
+    if "Consolidated" in view_mode:
+        active_display_df = aggregate_inventory_by_sku(raw_inv_df, lead_time_weeks=lead_time_val, safety_stock_weeks=safety_stock_val)
+    else:
+        active_display_df = compute_inventory_health(raw_inv_df, lead_time_weeks=lead_time_val, safety_stock_weeks=safety_stock_val)
+
+    # Stock filter
+    if stock_filter == "Active Stock (> 0 Units)":
+        active_display_df = active_display_df[active_display_df["units_available"] > 0]
+    elif stock_filter == "Depleted / Out of Stock":
+        active_display_df = active_display_df[active_display_df["units_available"] == 0]
+
+    # Top KPI Metrics Row
+    tot_avail_units = active_display_df["units_available"].sum() if not active_display_df.empty else 0.0
+    tot_whs_val = active_display_df["wholesale_valuation"].sum() if not active_display_df.empty else 0.0
+    tot_cogs_val = active_display_df["cogs_valuation"].sum() if not active_display_df.empty else 0.0
+    tot_weekly_burn = active_display_df["weekly_velocity"].sum() if not active_display_df.empty else 0.0
+    overall_woh = (tot_avail_units / tot_weekly_burn) if tot_weekly_burn > 0 else 0.0
+
+    km1, km2, km3, km4, km5 = st.columns(5)
+    km1.metric("Available In Stock", f"{int(tot_avail_units):,} Units")
+    km2.metric("Wholesale Valuation", f"${tot_whs_val:,.2f}")
+    km3.metric("Inventory COGS Value", f"${tot_cogs_val:,.2f}")
+    km4.metric("Weekly Burn Rate", f"{int(tot_weekly_burn):,} Units/Wk")
+    km5.metric("Brand Overall Runway", f"{overall_woh:.1f} Weeks")
 
     st.markdown("<br>", unsafe_allow_html=True)
-    
-    # Days of Supply Visual
-    fig_doh = px.bar(
-        current_inv,
-        x="product_name",
-        y="days_of_supply",
-        color="inventory_status",
-        color_discrete_map={
-            "🔴 Critical Stockout Risk": "#dc3545",
-            "🟡 Reorder Now (In Lead-Time)": "#ffc107",
-            "🟢 Healthy Stock": "#28a745",
-            "🔵 High / Overstocked": "#17a2b8",
-        },
-        text="days_of_supply",
-        title="Days of Supply Remaining by SKU",
-    )
-    fig_doh.update_traces(texttemplate="%{text:.0f} d", textposition="outside")
-    fig_doh.add_hline(
-        y=lead_time_val * 7,
-        line_dash="dash",
-        line_color="#dc3545",
-        annotation_text=f"Production Lead-Time Threshold ({lead_time_val*7} Days)",
-    )
-    fig_doh.update_layout(
-        xaxis_title="",
-        yaxis_title="Days of Inventory on Hand",
-        height=350,
-        margin=dict(l=20, r=20, t=40, b=20),
-    )
-    st.plotly_chart(fig_doh, use_container_width=True)
 
-    # Detailed SKU Table
-    st.markdown("#### SKU Health & Production Schedule")
-    st.dataframe(
-        current_inv[[
-            "sku",
-            "product_name",
-            "warehouse",
-            "units_available",
-            "weekly_velocity",
-            "days_of_supply",
-            "weeks_of_supply",
-            "reorder_trigger_date",
-            "inventory_status",
-            "manufacturer",
-        ]],
-        use_container_width=True,
-        hide_index=True,
-    )
+    if not active_display_df.empty:
+        # VISUAL CHARTS ROW 1: Stock by SKU & Valuation Share
+        ch_col1, ch_col2 = st.columns([1.3, 1])
+        with ch_col1:
+            st.markdown("#### 📊 Available Units by SKU")
+            sorted_units_df = active_display_df.sort_values("units_available", ascending=True)
+            fig_units = px.bar(
+                sorted_units_df,
+                x="units_available",
+                y="product_name",
+                orientation="h",
+                color="category",
+                color_discrete_map={
+                    "Gummies - Solventless Rosin": "#2d6a4f",
+                    "Gummies - Distillate": "#e76f51",
+                },
+                text="units_available",
+                hover_data={"wholesale_valuation": ":$,.2f", "weekly_velocity": True, "product_name": False},
+                labels={"units_available": "Units Available", "product_name": "Product SKU", "category": "Product Line"},
+            )
+            fig_units.update_traces(texttemplate="%{text:,.0f} units", textposition="inside")
+            fig_units.update_layout(
+                height=380,
+                margin=dict(l=10, r=20, t=20, b=30),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_units, use_container_width=True)
 
-    # Edit SKU parameters
-    with st.expander("✏️ Update Inventory Numbers & Weekly Burn Rates"):
-        st.caption("Edit stock counts or burn rates below. Uploading a Nabis Inventory CSV will update these automatically.")
-        edited_inv = st.data_editor(
-            st.session_state.inventory_df[[
+        with ch_col2:
+            st.markdown("#### 💰 Wholesale Inventory Value Share")
+            donut_data = active_display_df[active_display_df["wholesale_valuation"] > 0]
+            if not donut_data.empty:
+                fig_donut = px.pie(
+                    donut_data,
+                    names="product_name",
+                    values="wholesale_valuation",
+                    hole=0.45,
+                    color_discrete_sequence=px.colors.qualitative.Prism,
+                )
+                fig_donut.update_traces(textposition="inside", textinfo="percent+label")
+                fig_donut.update_layout(
+                    showlegend=False,
+                    height=380,
+                    margin=dict(l=10, r=10, t=20, b=20),
+                )
+                st.plotly_chart(fig_donut, use_container_width=True)
+            else:
+                st.info("No active valuation data.")
+
+        # VISUAL CHARTS ROW 2: Weeks of Supply Runway & Velocity Depletion Matrix
+        ch_col3, ch_col4 = st.columns([1.2, 1.2])
+        with ch_col3:
+            st.markdown("#### ⏳ Weeks of Supply Remaining (Depletion Runway)")
+            status_color_map = {
+                "🔴 Critical Stockout Risk": "#dc3545",
+                "🟡 Reorder Now (In Lead-Time)": "#ffc107",
+                "🟢 Healthy Stock": "#28a745",
+                "🔵 Well Stocked": "#17a2b8",
+                "⚫ Depleted / Out of Stock": "#6c757d",
+            }
+            sorted_woh_df = active_display_df.sort_values("weeks_of_supply", ascending=False)
+            fig_runway = px.bar(
+                sorted_woh_df,
+                x="product_name",
+                y="weeks_of_supply",
+                color="inventory_status",
+                color_discrete_map=status_color_map,
+                text="weeks_of_supply",
+                labels={"weeks_of_supply": "Weeks on Hand", "product_name": "SKU", "inventory_status": "Health Status"},
+            )
+            fig_runway.update_traces(texttemplate="%{text:.1f} wks", textposition="outside")
+            fig_runway.add_hline(
+                y=total_lead_horizon,
+                line_dash="dash",
+                line_color="#dc3545",
+                annotation_text=f"Reorder Horizon ({total_lead_horizon} Wks)",
+                annotation_position="top left",
+            )
+            fig_runway.update_layout(
+                xaxis_title="",
+                yaxis_title="Weeks of Supply",
+                height=380,
+                margin=dict(l=20, r=20, t=30, b=60),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_runway, use_container_width=True)
+
+        with ch_col4:
+            st.markdown("#### ⚡ Weekly Sales Burn Rate vs. Stock On Hand")
+            bubble_df = active_display_df.copy()
+            fig_scatter = px.scatter(
+                bubble_df,
+                x="weekly_velocity",
+                y="units_available",
+                size=bubble_df["wholesale_valuation"].apply(lambda v: max(v, 100)),
+                color="category",
+                color_discrete_map={
+                    "Gummies - Solventless Rosin": "#2d6a4f",
+                    "Gummies - Distillate": "#e76f51",
+                },
+                text="product_name",
+                labels={"weekly_velocity": "Weekly Velocity (Units/Wk)", "units_available": "Units Available", "category": "Line"},
+                hover_data={"wholesale_valuation": ":$,.2f", "weeks_of_supply": ":.1f wks"},
+            )
+            fig_scatter.update_traces(textposition="top center")
+            fig_scatter.update_layout(
+                height=380,
+                margin=dict(l=20, r=20, t=30, b=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+        st.markdown("---")
+
+        # Interactive Data Table
+        st.markdown("#### 📋 Detailed Inventory Schedule & Reorder Triggers")
+        search_kw = st.text_input("🔍 Search Inventory by SKU Name or Batch Code", "")
+        tbl_df = active_display_df.copy()
+        if search_kw:
+            mask = (
+                tbl_df["product_name"].str.contains(search_kw, case=False, na=False)
+                | tbl_df["sku"].str.contains(search_kw, case=False, na=False)
+                | tbl_df["batch_code"].astype(str).str.contains(search_kw, case=False, na=False)
+            )
+            tbl_df = tbl_df[mask]
+
+        if "Consolidated" in view_mode:
+            display_cols = [
+                "sku",
+                "product_name",
+                "category",
+                "manufacturer",
+                "units_available",
+                "weekly_velocity",
+                "weeks_of_supply",
+                "days_of_supply",
+                "wholesale_price",
+                "wholesale_valuation",
+                "inventory_status",
+                "reorder_trigger_date",
+                "batch_code",
+                "expiration_date",
+            ]
+            valid_cols = [c for c in display_cols if c in tbl_df.columns]
+            rename_dict = {
+                "sku": "SKU Code",
+                "product_name": "Product Name",
+                "category": "Category",
+                "manufacturer": "Co-Packer",
+                "units_available": "Avail Units",
+                "weekly_velocity": "Weekly Burn",
+                "weeks_of_supply": "Weeks on Hand",
+                "days_of_supply": "Days Supply",
+                "wholesale_price": "Unit Price",
+                "wholesale_valuation": "Wholesale Value",
+                "inventory_status": "Status",
+                "reorder_trigger_date": "Target Reorder Date",
+                "batch_code": "Batch Code(s)",
+                "expiration_date": "Earliest Expiration",
+            }
+            styled_tbl = tbl_df[valid_cols].rename(columns=rename_dict).copy()
+            if "Unit Price" in styled_tbl.columns:
+                styled_tbl["Unit Price"] = styled_tbl["Unit Price"].apply(lambda x: f"${x:,.2f}")
+            if "Wholesale Value" in styled_tbl.columns:
+                styled_tbl["Wholesale Value"] = styled_tbl["Wholesale Value"].apply(lambda x: f"${x:,.2f}")
+            if "Avail Units" in styled_tbl.columns:
+                styled_tbl["Avail Units"] = styled_tbl["Avail Units"].apply(lambda x: f"{int(x):,}")
+            if "Weekly Burn" in styled_tbl.columns:
+                styled_tbl["Weekly Burn"] = styled_tbl["Weekly Burn"].apply(lambda x: f"{int(x):,}")
+            if "Weeks on Hand" in styled_tbl.columns:
+                styled_tbl["Weeks on Hand"] = styled_tbl["Weeks on Hand"].apply(lambda x: f"{x:.1f} wks")
+            if "Days Supply" in styled_tbl.columns:
+                styled_tbl["Days Supply"] = styled_tbl["Days Supply"].apply(lambda x: f"{x:.0f} d")
+
+            st.dataframe(styled_tbl, use_container_width=True, hide_index=True)
+        else:
+            display_cols = [
                 "sku",
                 "product_name",
                 "warehouse",
-                "units_on_hand",
-                "units_reserved",
+                "batch_code",
+                "expiration_date",
                 "units_available",
+                "units_reserved",
+                "units_on_hand",
                 "weekly_velocity",
-                "batch_cost",
+                "weeks_of_supply",
                 "wholesale_price",
-                "manufacturer",
-            ]],
-            use_container_width=True,
-            num_rows="dynamic",
-        )
-        if st.button("💾 Save Inventory Changes"):
-            st.session_state.inventory_df = edited_inv.copy()
+                "wholesale_valuation",
+                "inventory_status",
+            ]
+            valid_cols = [c for c in display_cols if c in tbl_df.columns]
+            rename_dict = {
+                "sku": "SKU Code",
+                "product_name": "Product Name",
+                "warehouse": "Warehouse Facility",
+                "batch_code": "Batch / Lot Code",
+                "expiration_date": "Expiration Date",
+                "units_available": "Available",
+                "units_reserved": "Packed/Reserved",
+                "units_on_hand": "Total Count",
+                "weekly_velocity": "4-Wk Avg Velocity",
+                "weeks_of_supply": "Weeks on Hand",
+                "wholesale_price": "Price",
+                "wholesale_valuation": "Wholesale Valuation",
+                "inventory_status": "Status",
+            }
+            styled_tbl = tbl_df[valid_cols].rename(columns=rename_dict).copy()
+            if "Price" in styled_tbl.columns:
+                styled_tbl["Price"] = styled_tbl["Price"].apply(lambda x: f"${x:,.2f}")
+            if "Wholesale Valuation" in styled_tbl.columns:
+                styled_tbl["Wholesale Valuation"] = styled_tbl["Wholesale Valuation"].apply(lambda x: f"${x:,.2f}")
+            if "Available" in styled_tbl.columns:
+                styled_tbl["Available"] = styled_tbl["Available"].apply(lambda x: f"{int(x):,}")
+            if "Packed/Reserved" in styled_tbl.columns:
+                styled_tbl["Packed/Reserved"] = styled_tbl["Packed/Reserved"].apply(lambda x: f"{int(x):,}")
+            if "Total Count" in styled_tbl.columns:
+                styled_tbl["Total Count"] = styled_tbl["Total Count"].apply(lambda x: f"{int(x):,}")
+
+            st.dataframe(styled_tbl, use_container_width=True, hide_index=True)
+
+    else:
+        st.info("No inventory records match the selected filters.")
+
+    # Manual Editor Expander
+    with st.expander("✏️ Manual Data Override & Batch Adjustments"):
+        st.caption("Manually adjust stock counts or velocities below. Uploading a Nabis Inventory CSV in Tab 6 refreshes these automatically.")
+        editable_cols = [c for c in ["sku", "product_name", "units_available", "weekly_velocity", "batch_cost", "wholesale_price", "manufacturer"] if c in st.session_state.inventory_df.columns]
+        edited_inv = st.data_editor(st.session_state.inventory_df[editable_cols], use_container_width=True, num_rows="dynamic")
+        if st.button("💾 Save Manual Inventory Adjustments"):
+            for col in editable_cols:
+                st.session_state.inventory_df[col] = edited_inv[col]
             st.success("Inventory updated successfully!")
             st.rerun()
 
@@ -965,12 +1171,19 @@ with tab_upload:
         )
         if uploaded_inventory:
             try:
-                new_inv_df = parse_nabis_inventory_export(uploaded_inventory)
+                # Save to Nabis Inventory directory so it persists in the repository
+                inv_dir = os.path.join(BASE_DIR, "Nabis Inventory")
+                os.makedirs(inv_dir, exist_ok=True)
+                save_path = os.path.join(inv_dir, uploaded_inventory.name)
+                with open(save_path, "wb") as f:
+                    f.write(uploaded_inventory.getbuffer())
+
+                new_inv_df = parse_nabis_inventory_export(save_path)
                 if not new_inv_df.empty:
                     st.session_state.inventory_df = new_inv_df.copy()
-                    st.success(f"✅ Successfully parsed {len(new_inv_df)} inventory SKUs from Nabis!")
+                    st.success(f"✅ Successfully parsed {len(new_inv_df)} inventory line items and saved to Nabis Inventory/{uploaded_inventory.name}!")
                     st.dataframe(new_inv_df.head(5))
-                    st.info("The Inventory & Reorder Monitor (Tab 4) and Executive Overview (Tab 1) have been dynamically updated!")
+                    st.info("The Inventory & SKU Monitor (Tab 4) and Executive Overview (Tab 1) have been dynamically updated!")
                 else:
                     st.warning("Could not automatically identify standard Nabis inventory columns. Showing raw preview:")
                     if uploaded_inventory.name.endswith(".csv"):

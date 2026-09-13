@@ -11,6 +11,8 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import openpyxl
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def parse_nabis_remittance_file(file_path: str) -> Tuple[pd.DataFrame, Dict]:
     """
@@ -262,86 +264,15 @@ def load_budget_cashflow_model(file_path: str) -> Dict[str, pd.DataFrame]:
     }
 
 
-def get_default_inventory_data() -> pd.DataFrame:
-    """
-    Returns baseline/current inventory tracking dataframe for Auntie Aloha SKUs
-    (Gummies Distillate, Rosin, and flavors) until live Nabis inventory CSV is uploaded.
-    """
-    records = [
-        {
-            "sku": "AA-GUM-DIST-100MG",
-            "product_name": "Auntie Aloha Distillate Gummies 100mg",
-            "category": "Gummies - Distillate",
-            "warehouse": "Nabis Oakland",
-            "units_on_hand": 1840,
-            "units_reserved": 320,
-            "units_available": 1520,
-            "weekly_velocity": 245,
-            "reorder_threshold": 500,
-            "batch_cost": 2.20,
-            "wholesale_price": 7.50,
-            "manufacturer": "Smoakland",
-        },
-        {
-            "sku": "AA-GUM-DIST-SOU-100MG",
-            "product_name": "Auntie Aloha Sour Tropical Distillate 100mg",
-            "category": "Gummies - Distillate",
-            "warehouse": "Nabis Los Angeles",
-            "units_on_hand": 960,
-            "units_reserved": 180,
-            "units_available": 780,
-            "weekly_velocity": 130,
-            "reorder_threshold": 300,
-            "batch_cost": 2.20,
-            "wholesale_price": 7.50,
-            "manufacturer": "Smoakland",
-        },
-        {
-            "sku": "AA-GUM-ROSN-100MG",
-            "product_name": "Auntie Aloha Live Rosin Gummies 100mg",
-            "category": "Gummies - Solventless Rosin",
-            "warehouse": "Nabis Oakland",
-            "units_on_hand": 540,
-            "units_reserved": 90,
-            "units_available": 450,
-            "weekly_velocity": 95,
-            "reorder_threshold": 250,
-            "batch_cost": 3.80,
-            "wholesale_price": 10.00,
-            "manufacturer": "MyGreen Network",
-        },
-        {
-            "sku": "AA-GUM-ROSN-LILIKOI",
-            "product_name": "Auntie Aloha Lilikoi Passionfruit Rosin",
-            "category": "Gummies - Solventless Rosin",
-            "warehouse": "Nabis Los Angeles",
-            "units_on_hand": 310,
-            "units_reserved": 40,
-            "units_available": 270,
-            "weekly_velocity": 65,
-            "reorder_threshold": 180,
-            "batch_cost": 3.80,
-            "wholesale_price": 10.00,
-            "manufacturer": "MyGreen Network",
-        },
-    ]
-    df = pd.DataFrame(records)
-    df["days_of_supply"] = (df["units_available"] / (df["weekly_velocity"] / 7.0)).round(1)
-    df["weeks_of_supply"] = (df["units_available"] / df["weekly_velocity"]).round(1)
-    df["status"] = df["days_of_supply"].apply(
-        lambda d: "🔴 Critical Reorder" if d < 21 else ("🟡 Reorder Soon" if d < 35 else "🟢 Healthy")
-    )
-    return df
-
-
 def parse_nabis_inventory_export(file_or_buffer) -> pd.DataFrame:
     """
     Parses a Nabis inventory CSV or Excel export.
-    Uses smart fuzzy column matching to handle various Nabis report versions:
-    - Product / Item Name
-    - SKU
-    - Units Available / Total On Hand / Reserved
-    - Warehouse Location (Oakland, Los Angeles)
+    Uses an advanced Smart Fuzzy Matcher to automatically identify and extract:
+    - SKU Code & Product Name
+    - Available, Total On-Hand, Packed/Reserved, Incoming, Quarantined units
+    - Weekly Velocity (trailing 4-week sales average) & Weeks on Hand (WOH)
+    - Batch/Lot Code & Expiration Dates
+    - Wholesale Price, Sample tags, and Warehouse Facilities (Woodlake, Oakland, LA)
     """
     try:
         if hasattr(file_or_buffer, "name"):
@@ -358,21 +289,105 @@ def parse_nabis_inventory_export(file_or_buffer) -> pd.DataFrame:
         else:
             df_raw = pd.DataFrame(file_or_buffer)
 
-        # Build clean column map
+        # Build case-insensitive column map
         col_map = {orig: str(orig).strip().lower() for orig in df_raw.columns}
 
-        def find_col(patterns):
-            for orig, clean in col_map.items():
-                if any(p in clean for p in patterns):
-                    return orig
+        def find_col(exact_candidates, fallback_substrings=None, exclude_prefixes=None):
+            # 1. Exact matches first across candidates
+            for cand in exact_candidates:
+                target = cand.lower().strip()
+                for orig, clean in col_map.items():
+                    if clean == target:
+                        return orig
+            # 2. Substring matches with optional exclusions (avoids picking hub-specific cols like oak_vel)
+            if fallback_substrings:
+                for cand in fallback_substrings:
+                    target = cand.lower().strip()
+                    for orig, clean in col_map.items():
+                        if exclude_prefixes and any(clean.startswith(p.lower()) for p in exclude_prefixes):
+                            continue
+                        if target in clean:
+                            return orig
             return None
 
-        col_product = find_col(["product name", "item name", "product", "item", "description", "title"])
-        col_sku = find_col(["sku", "item code", "code", "upc"])
-        col_avail = find_col(["available", "sellable", "salable", "units available"])
-        col_total = find_col(["total on hand", "on hand", "units on hand", "total units", "quantity", "qty"])
-        col_reserved = find_col(["reserved", "allocated", "hold"])
-        col_whs = find_col(["warehouse", "facility", "location", "hub", "site"])
+        # Hub prefixes to exclude when searching for brand-wide aggregate columns
+        hub_prefixes = ["oak_", "la_", "woodlake_", "oakland_", "los_angeles_"]
+
+        col_sku = find_col(
+            ["sku_code", "sku", "sku code", "item_code", "item code", "code", "upc"],
+            ["sku", "item_code", "code"]
+        )
+        col_product = find_col(
+            ["sku_name", "product_name", "product name", "item_name", "item name", "description", "title", "product"],
+            ["sku_name", "product_name", "item_name", "description", "title"]
+        )
+        col_avail = find_col(
+            ["total_available", "units_available", "available", "available_units", "total available"],
+            ["total_available", "available"],
+            exclude_prefixes=hub_prefixes
+        )
+        col_total = find_col(
+            ["total_count", "total_units", "units_on_hand", "total on hand", "quantity_on_hand", "qty on hand", "total_on_hand"],
+            ["total_count", "units_on_hand", "on_hand"],
+            exclude_prefixes=hub_prefixes
+        )
+        col_packed = find_col(
+            ["total_packed", "units_reserved", "units_packed", "total packed", "reserved", "allocated", "packed"],
+            ["total_packed", "packed", "reserved"],
+            exclude_prefixes=hub_prefixes
+        )
+        col_incoming = find_col(
+            ["total_incoming", "incoming_units", "total incoming", "incoming"],
+            ["incoming"],
+            exclude_prefixes=hub_prefixes
+        )
+        col_quarantined = find_col(
+            ["total_quarantined", "quarantined_units", "total quarantined", "quarantined"],
+            ["quarantined", "hold"],
+            exclude_prefixes=hub_prefixes
+        )
+        col_price = find_col(
+            ["sku_price_per_unit", "wholesale_price", "wholesale price", "price per unit", "price", "unit price"],
+            ["price_per_unit", "wholesale_price", "unit_price"]
+        )
+        col_woh = find_col(
+            ["weeks_on_hand", "weeks on hand", "woh"],
+            ["weeks_on_hand", "weeksonhand", "woh"],
+            exclude_prefixes=hub_prefixes
+        )
+        col_vel = find_col(
+            ["trailing_4_weeks_sales_avg", "weekly_velocity", "avg_weekly_volume", "sales_avg", "weekly velocity"],
+            ["trailing_4_weeks", "weekly_velocity", "weekly_volume", "trailing4weekssalesavg", "velocity"],
+            exclude_prefixes=hub_prefixes
+        )
+        col_sample = find_col(
+            ["sku_is_sample", "is_sample", "sample"],
+            ["is_sample", "sample"]
+        )
+        col_batch = find_col(
+            ["batch_code", "batch code", "batch", "lot", "lot number", "batch number", "lot_number", "lot_code"],
+            ["batch_code", "batch", "lot"]
+        )
+        col_exp = find_col(
+            ["batch_expiration_date", "expiration date", "expiration", "exp date", "expiry", "batch_exp_date"],
+            ["expiration", "exp_date", "expiry"]
+        )
+        col_woodlake = find_col(
+            ["woodlake_available", "woodlake_count", "woodlake"],
+            ["woodlake_available", "woodlake"]
+        )
+        col_oak = find_col(
+            ["oak_available", "oakland_available", "oakland"],
+            ["oak_available", "oakland"]
+        )
+        col_la = find_col(
+            ["la_commerce_available", "la_available", "los_angeles_available", "la_commerce"],
+            ["la_commerce_available", "la_available"]
+        )
+        col_whs_generic = find_col(
+            ["warehouse", "facility", "location", "hub", "site"],
+            ["warehouse", "facility", "location"]
+        )
 
         records = []
         for idx, row in df_raw.iterrows():
@@ -381,57 +396,264 @@ def parse_nabis_inventory_export(file_or_buffer) -> pd.DataFrame:
                 continue
 
             sku = str(row[col_sku]).strip() if col_sku else f"AA-SKU-{idx+1}"
-            whs = str(row[col_whs]).strip() if col_whs else "Nabis Warehouse"
+            batch = str(row[col_batch]).strip() if col_batch and pd.notna(row[col_batch]) else "--"
+            exp_date = str(row[col_exp]).strip() if col_exp and pd.notna(row[col_exp]) else "--"
 
-            def get_num(col):
-                if col:
+            def get_num(col, default=0.0):
+                if col and col in row:
                     try:
                         v = float(row[col])
-                        return v if not pd.isna(v) else 0.0
-                    except:
-                        return 0.0
-                return 0.0
+                        return v if not pd.isna(v) else default
+                    except (ValueError, TypeError):
+                        return default
+                return default
 
-            total_units = get_num(col_total)
+            total_count = get_num(col_total)
             avail_units = get_num(col_avail)
-            res_units = get_num(col_reserved)
-            if avail_units == 0 and total_units > 0:
-                avail_units = max(0.0, total_units - res_units)
-            if total_units == 0 and avail_units > 0:
-                total_units = avail_units + res_units
+            packed_units = get_num(col_packed)
+            incoming_units = get_num(col_incoming)
+            quarantined_units = get_num(col_quarantined)
+            unit_price = get_num(col_price, 6.99)
+            weekly_vel = get_num(col_vel, 0.0)
+            woh_val = get_num(col_woh, 0.0)
 
-            # Determine category & manufacturer
-            p_lower = prod.lower()
-            if "rosin" in p_lower:
-                cat = "Gummies - Solventless Rosin"
+            # Reconcile unit numbers
+            if avail_units == 0 and total_count > 0:
+                avail_units = max(0.0, total_count - packed_units - quarantined_units)
+            if total_count == 0 and avail_units > 0:
+                total_count = avail_units + packed_units + quarantined_units
+
+            # Determine sample status
+            sample_val = str(row.get(col_sample, "")).strip().upper() if col_sample else ""
+            is_sample = (
+                sample_val.startswith("Y")
+                or "SAMPLE" in sku.upper()
+                or "SAMPLE" in prod.upper()
+                or unit_price <= 0.05
+            )
+
+            # Determine category, manufacturer & standard COGS
+            name_and_sku = f"{prod} {sku}".lower()
+            if any(k in name_and_sku for k in ["rosin", "solventless", "thcv", "cbn"]):
+                category = "Gummies - Solventless Rosin"
                 mfg = "MyGreen Network"
-                cost = 3.80
-                whs_price = 10.00
-                default_vel = 80.0
+                cogs = 3.80
+                if unit_price <= 0.05 and not is_sample:
+                    unit_price = 9.00
             else:
-                cat = "Gummies - Distillate"
+                category = "Gummies - Distillate"
                 mfg = "Smoakland"
-                cost = 2.20
-                whs_price = 7.50
-                default_vel = 180.0
+                cogs = 2.20
+                if unit_price <= 0.05 and not is_sample:
+                    unit_price = 6.99
+
+            # Warehouse facility determination
+            woodlake_qty = get_num(col_woodlake)
+            oak_qty = get_num(col_oak)
+            la_qty = get_num(col_la)
+
+            if woodlake_qty > 0:
+                warehouse = "Woodlake Hub"
+            elif oak_qty > 0:
+                warehouse = "Oakland Hub"
+            elif la_qty > 0:
+                warehouse = "LA Commerce Hub"
+            elif col_whs_generic and str(row[col_whs_generic]).strip():
+                warehouse = str(row[col_whs_generic]).strip()
+            else:
+                warehouse = "Woodlake Hub"
+
+            # Compute depletion and status
+            days_supply = round(woh_val * 7.0, 1) if woh_val > 0 else (round(avail_units / (weekly_vel / 7.0), 1) if weekly_vel > 0 else 0.0)
+            if woh_val == 0.0 and weekly_vel > 0:
+                woh_val = round(avail_units / weekly_vel, 1)
+
+            if avail_units == 0:
+                status = "⚫ Out of Stock / Depleted"
+            elif woh_val < 5:
+                status = "🔴 Critical Stockout Risk"
+            elif woh_val < 8:
+                status = "🟡 Reorder Soon (Lead-Time)"
+            elif woh_val <= 25:
+                status = "🟢 Healthy Stock"
+            else:
+                status = "🔵 Well Stocked"
 
             records.append({
                 "sku": sku,
                 "product_name": prod,
-                "category": cat,
-                "warehouse": whs,
-                "units_on_hand": total_units,
-                "units_reserved": res_units,
+                "category": category,
+                "warehouse": warehouse,
+                "batch_code": batch,
+                "expiration_date": exp_date,
+                "units_on_hand": total_count,
+                "units_reserved": packed_units,
                 "units_available": avail_units,
-                "weekly_velocity": default_vel,
-                "reorder_threshold": round(default_vel * 2.0),
-                "batch_cost": cost,
-                "wholesale_price": whs_price,
+                "units_incoming": incoming_units,
+                "units_quarantined": quarantined_units,
+                "weekly_velocity": weekly_vel,
+                "weeks_on_hand": woh_val,
+                "days_of_supply": days_supply,
+                "batch_cost": cogs,
+                "wholesale_price": unit_price,
+                "cogs_valuation": round(avail_units * cogs, 2),
+                "wholesale_valuation": round(avail_units * unit_price, 2),
                 "manufacturer": mfg,
+                "is_sample": is_sample,
+                "inventory_status": status,
             })
 
-        return pd.DataFrame(records)
+        df_out = pd.DataFrame(records)
+        return df_out
     except Exception as e:
         print(f"Error parsing Nabis inventory export: {e}")
         return pd.DataFrame()
+
+
+def get_default_inventory_data() -> pd.DataFrame:
+    """
+    Loads latest actual Nabis Inventory report from disk if available,
+    otherwise falls back to benchmark baseline data.
+    """
+    # 1. Search for real inventory files in Nabis Inventory folder or project root
+    search_dirs = [
+        os.path.join(BASE_DIR, "Nabis Inventory"),
+        BASE_DIR,
+    ]
+    candidate_files = []
+    for d in search_dirs:
+        if os.path.exists(d):
+            candidate_files.extend(glob.glob(os.path.join(d, "*inventory*.csv")))
+            candidate_files.extend(glob.glob(os.path.join(d, "*inventory*.xlsx")))
+
+    if candidate_files:
+        # Load the latest file by modification time
+        latest_file = sorted(candidate_files, key=os.path.getmtime)[-1]
+        try:
+            parsed_df = parse_nabis_inventory_export(latest_file)
+            if not parsed_df.empty:
+                return parsed_df
+        except Exception as e:
+            print(f"Warning: Failed to load inventory from {latest_file}: {e}")
+
+    # 2. Hardcoded fallback if no files present
+    records = [
+        {
+            "sku": "AA-MahinaMoon-10pc-10mg pack",
+            "product_name": "Mahina Moon Yuzu Lavender CBN x Live Rosin 10mg 10pc pack",
+            "category": "Gummies - Solventless Rosin",
+            "warehouse": "Woodlake Hub",
+            "batch_code": "AA-YL-070726",
+            "expiration_date": "07/24/2027",
+            "units_on_hand": 1700,
+            "units_reserved": 0,
+            "units_available": 1700,
+            "units_incoming": 0,
+            "units_quarantined": 0,
+            "weekly_velocity": 125,
+            "weeks_on_hand": 53,
+            "days_of_supply": 371.0,
+            "batch_cost": 3.80,
+            "wholesale_price": 9.00,
+            "cogs_valuation": 6460.0,
+            "wholesale_valuation": 15300.0,
+            "manufacturer": "MyGreen Network",
+            "is_sample": False,
+            "inventory_status": "🔵 Well Stocked",
+        },
+        {
+            "sku": "AA-LycheeLuana-THCVLiveRosin-10mg-10pc-Bag",
+            "product_name": "Lychee Luana THCV x Live Rosin 10mg 10pc pack",
+            "category": "Gummies - Solventless Rosin",
+            "warehouse": "Woodlake Hub",
+            "batch_code": "AA-PL-042926",
+            "expiration_date": "04/28/2027",
+            "units_on_hand": 1184,
+            "units_reserved": 25,
+            "units_available": 1159,
+            "units_incoming": 0,
+            "units_quarantined": 0,
+            "weekly_velocity": 151,
+            "weeks_on_hand": 31,
+            "days_of_supply": 217.0,
+            "batch_cost": 3.80,
+            "wholesale_price": 9.00,
+            "cogs_valuation": 4404.2,
+            "wholesale_valuation": 10431.0,
+            "manufacturer": "MyGreen Network",
+            "is_sample": False,
+            "inventory_status": "🔵 Well Stocked",
+        },
+        {
+            "sku": "AA-AlohaMix-MIX-10mg-10pc-Bag",
+            "product_name": "Aloha Mix 10mg 10pc pack",
+            "category": "Gummies - Distillate",
+            "warehouse": "Woodlake Hub",
+            "batch_code": "AAG-AMX-04092026",
+            "expiration_date": "04/06/2027",
+            "units_on_hand": 1562,
+            "units_reserved": 0,
+            "units_available": 1562,
+            "units_incoming": 0,
+            "units_quarantined": 0,
+            "weekly_velocity": 148,
+            "weeks_on_hand": 42,
+            "days_of_supply": 294.0,
+            "batch_cost": 2.20,
+            "wholesale_price": 6.99,
+            "cogs_valuation": 3436.4,
+            "wholesale_valuation": 10918.38,
+            "manufacturer": "Smoakland",
+            "is_sample": False,
+            "inventory_status": "🔵 Well Stocked",
+        },
+        {
+            "sku": "AA-HawaiianGuavaHaze-I-10mg-10pc-Bag",
+            "product_name": "Hawaiian Guava Haze 10mg 10pc pack",
+            "category": "Gummies - Distillate",
+            "warehouse": "Woodlake Hub",
+            "batch_code": "AAG-HGH-04072026",
+            "expiration_date": "04/02/2027",
+            "units_on_hand": 1387,
+            "units_reserved": 25,
+            "units_available": 1362,
+            "units_incoming": 0,
+            "units_quarantined": 0,
+            "weekly_velocity": 100,
+            "weeks_on_hand": 55,
+            "days_of_supply": 385.0,
+            "batch_cost": 2.20,
+            "wholesale_price": 6.99,
+            "cogs_valuation": 2996.4,
+            "wholesale_valuation": 9520.38,
+            "manufacturer": "Smoakland",
+            "is_sample": False,
+            "inventory_status": "🔵 Well Stocked",
+        },
+        {
+            "sku": "AA-HanaleiHighTide-S-10mg-10pc-Bag",
+            "product_name": "Hanalei high Tide 10mg 10pc pack",
+            "category": "Gummies - Distillate",
+            "warehouse": "Woodlake Hub",
+            "batch_code": "AAG-HHT-04012026",
+            "expiration_date": "03/31/2027",
+            "units_on_hand": 1115,
+            "units_reserved": 25,
+            "units_available": 1065,
+            "units_incoming": 0,
+            "units_quarantined": 0,
+            "weekly_velocity": 200,
+            "weeks_on_hand": 22,
+            "days_of_supply": 154.0,
+            "batch_cost": 2.20,
+            "wholesale_price": 6.99,
+            "cogs_valuation": 2343.0,
+            "wholesale_valuation": 7444.35,
+            "manufacturer": "Smoakland",
+            "is_sample": False,
+            "inventory_status": "🟢 Healthy Stock",
+        },
+    ]
+    return pd.DataFrame(records)
+
 
