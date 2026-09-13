@@ -104,6 +104,61 @@ st.markdown(
 )
 
 
+
+def check_password() -> bool:
+    """Returns True if the user entered the correct passphrase."""
+    if st.session_state.get("authenticated", False):
+        return True
+
+    # Retrieve configured password from Streamlit secrets, environment, or default
+    expected_pw = os.environ.get("DASHBOARD_PASSWORD", "aloha2026")
+    try:
+        if "DASHBOARD_PASSWORD" in st.secrets:
+            expected_pw = str(st.secrets["DASHBOARD_PASSWORD"])
+    except Exception:
+        pass
+
+    def validate():
+        input_pw = st.session_state.get("entered_password", "").strip()
+        if input_pw == expected_pw:
+            st.session_state["authenticated"] = True
+            st.session_state["login_failed"] = False
+        else:
+            st.session_state["login_failed"] = True
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    _, center_col, _ = st.columns([1, 2, 1])
+    with center_col:
+        st.markdown(
+            """
+            <div style="background: white; padding: 2.2rem 2.5rem; border-radius: 16px; border: 1px solid #e2e8f0; box-shadow: 0 10px 25px rgba(0,0,0,0.06); text-align: center;">
+                <div style="font-size: 3rem; margin-bottom: 0.5rem;">🌺</div>
+                <h2 style="color: #1b4332; margin-bottom: 0.2rem; font-weight: 700;">Auntie Aloha</h2>
+                <div style="color: #40916c; font-size: 1rem; margin-bottom: 1.5rem; font-weight: 500;">Business Intelligence & Financial Portal</div>
+                <div style="background: #f0fdf4; border-left: 4px solid #2d6a4f; padding: 0.8rem 1rem; border-radius: 6px; text-align: left; margin-bottom: 1.5rem; font-size: 0.88rem; color: #166534;">
+                    🔒 <b>Restricted Access:</b> This portal contains confidential wholesale remittances, bank cash models, and distributor records. Please enter your team passphrase to continue.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.form("login_form"):
+            st.text_input("Enter Passphrase", type="password", key="entered_password", placeholder="••••••••")
+            submit = st.form_submit_button("Unlock Dashboard 🔓", use_container_width=True)
+            if submit:
+                validate()
+                if st.session_state.get("authenticated", False):
+                    st.rerun()
+                else:
+                    st.error("❌ Incorrect passphrase. Please verify with your team administrator.")
+
+    return False
+
+
+if not check_password():
+    st.stop()
+
+
 @st.cache_data(ttl=3600)
 def get_dashboard_data():
     remittance_folder = os.path.join(BASE_DIR, "NABIS REMITTANCES 2025 TO YTD")
@@ -130,6 +185,9 @@ if "inventory_df" not in st.session_state:
 with st.sidebar:
     st.markdown("## 🌺 Auntie Aloha")
     st.markdown("**Business Intelligence Hub**")
+    if st.button("🔒 Lock Portal / Log Out", use_container_width=True):
+        st.session_state["authenticated"] = False
+        st.rerun()
     st.markdown("---")
     
     st.markdown("### ⚙️ Global Cash & Settings")
