@@ -332,3 +332,106 @@ def get_default_inventory_data() -> pd.DataFrame:
         lambda d: "🔴 Critical Reorder" if d < 21 else ("🟡 Reorder Soon" if d < 35 else "🟢 Healthy")
     )
     return df
+
+
+def parse_nabis_inventory_export(file_or_buffer) -> pd.DataFrame:
+    """
+    Parses a Nabis inventory CSV or Excel export.
+    Uses smart fuzzy column matching to handle various Nabis report versions:
+    - Product / Item Name
+    - SKU
+    - Units Available / Total On Hand / Reserved
+    - Warehouse Location (Oakland, Los Angeles)
+    """
+    try:
+        if hasattr(file_or_buffer, "name"):
+            fname = file_or_buffer.name.lower()
+            if fname.endswith(".csv"):
+                df_raw = pd.read_csv(file_or_buffer)
+            else:
+                df_raw = pd.read_excel(file_or_buffer)
+        elif isinstance(file_or_buffer, str):
+            if file_or_buffer.lower().endswith(".csv"):
+                df_raw = pd.read_csv(file_or_buffer)
+            else:
+                df_raw = pd.read_excel(file_or_buffer)
+        else:
+            df_raw = pd.DataFrame(file_or_buffer)
+
+        # Build clean column map
+        col_map = {orig: str(orig).strip().lower() for orig in df_raw.columns}
+
+        def find_col(patterns):
+            for orig, clean in col_map.items():
+                if any(p in clean for p in patterns):
+                    return orig
+            return None
+
+        col_product = find_col(["product name", "item name", "product", "item", "description", "title"])
+        col_sku = find_col(["sku", "item code", "code", "upc"])
+        col_avail = find_col(["available", "sellable", "salable", "units available"])
+        col_total = find_col(["total on hand", "on hand", "units on hand", "total units", "quantity", "qty"])
+        col_reserved = find_col(["reserved", "allocated", "hold"])
+        col_whs = find_col(["warehouse", "facility", "location", "hub", "site"])
+
+        records = []
+        for idx, row in df_raw.iterrows():
+            prod = str(row[col_product]).strip() if col_product else f"SKU {idx+1}"
+            if not prod or prod.lower() == "nan" or prod.lower() == "total":
+                continue
+
+            sku = str(row[col_sku]).strip() if col_sku else f"AA-SKU-{idx+1}"
+            whs = str(row[col_whs]).strip() if col_whs else "Nabis Warehouse"
+
+            def get_num(col):
+                if col:
+                    try:
+                        v = float(row[col])
+                        return v if not pd.isna(v) else 0.0
+                    except:
+                        return 0.0
+                return 0.0
+
+            total_units = get_num(col_total)
+            avail_units = get_num(col_avail)
+            res_units = get_num(col_reserved)
+            if avail_units == 0 and total_units > 0:
+                avail_units = max(0.0, total_units - res_units)
+            if total_units == 0 and avail_units > 0:
+                total_units = avail_units + res_units
+
+            # Determine category & manufacturer
+            p_lower = prod.lower()
+            if "rosin" in p_lower:
+                cat = "Gummies - Solventless Rosin"
+                mfg = "MyGreen Network"
+                cost = 3.80
+                whs_price = 10.00
+                default_vel = 80.0
+            else:
+                cat = "Gummies - Distillate"
+                mfg = "Smoakland"
+                cost = 2.20
+                whs_price = 7.50
+                default_vel = 180.0
+
+            records.append({
+                "sku": sku,
+                "product_name": prod,
+                "category": cat,
+                "warehouse": whs,
+                "units_on_hand": total_units,
+                "units_reserved": res_units,
+                "units_available": avail_units,
+                "weekly_velocity": default_vel,
+                "reorder_threshold": round(default_vel * 2.0),
+                "batch_cost": cost,
+                "wholesale_price": whs_price,
+                "manufacturer": mfg,
+            })
+
+        return pd.DataFrame(records)
+    except Exception as e:
+        print(f"Error parsing Nabis inventory export: {e}")
+        return pd.DataFrame()
+

@@ -22,6 +22,7 @@ from src.data_loader import (
     load_budget_cashflow_model,
     get_default_inventory_data,
     parse_nabis_remittance_file,
+    parse_nabis_inventory_export,
 )
 from src.cashflow_engine import generate_13_week_forecast, calculate_cash_runway_metrics
 from src.inventory_engine import compute_inventory_health
@@ -964,12 +965,19 @@ with tab_upload:
         )
         if uploaded_inventory:
             try:
-                if uploaded_inventory.name.endswith(".csv"):
-                    df_up_inv = pd.read_csv(uploaded_inventory)
+                new_inv_df = parse_nabis_inventory_export(uploaded_inventory)
+                if not new_inv_df.empty:
+                    st.session_state.inventory_df = new_inv_df.copy()
+                    st.success(f"✅ Successfully parsed {len(new_inv_df)} inventory SKUs from Nabis!")
+                    st.dataframe(new_inv_df.head(5))
+                    st.info("The Inventory & Reorder Monitor (Tab 4) and Executive Overview (Tab 1) have been dynamically updated!")
                 else:
-                    df_up_inv = pd.read_excel(uploaded_inventory)
-                st.success(f"Parsed {len(df_up_inv)} inventory lines!")
-                st.dataframe(df_up_inv.head(5))
+                    st.warning("Could not automatically identify standard Nabis inventory columns. Showing raw preview:")
+                    if uploaded_inventory.name.endswith(".csv"):
+                        df_raw = pd.read_csv(uploaded_inventory)
+                    else:
+                        df_raw = pd.read_excel(uploaded_inventory)
+                    st.dataframe(df_raw.head(5))
             except Exception as e:
                 st.error(f"Error processing inventory file: {e}")
 
