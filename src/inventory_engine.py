@@ -4,8 +4,40 @@ Tracks stock on hand, depletion run rates, days of supply, batch reorder trigger
 """
 
 import datetime
+import re
 from typing import Dict, List, Any
 import pandas as pd
+
+
+def is_obsolete_sku(row_or_dict) -> bool:
+    """
+    Identifies whether an item is a discontinued / superseded legacy SKU (e.g., 739X series).
+    """
+    if bool(row_or_dict.get("is_obsolete", False)):
+        return True
+    sku_val = str(row_or_dict.get("sku", "")).strip().upper()
+    prod_val = str(row_or_dict.get("product_name", "")).strip().upper()
+
+    if bool(re.match(r"^739\d", sku_val)) or sku_val in ["7391", "7392", "7393", "7394", "7395"]:
+        return True
+    if prod_val in ["PAKALOLO POG", "OG LAVA FLOW", "HANALEI HIGH TIDE", "LILIKOI CITRUS BUZZ", "HAWAIIAN GUAVA HAZE"]:
+        return True
+    return False
+
+
+def is_active_commercial_sku(row_or_dict) -> bool:
+    """
+    Returns True only for active commercial SKUs (excludes promotional samples and discontinued/obsolete lines).
+    """
+    if bool(row_or_dict.get("is_sample", False)):
+        return False
+    sku_val = str(row_or_dict.get("sku", "")).strip().upper()
+    prod_val = str(row_or_dict.get("product_name", "")).strip().upper()
+    if "SAMPLE" in sku_val or "SAMPLE" in prod_val:
+        return False
+    if is_obsolete_sku(row_or_dict):
+        return False
+    return True
 
 
 def compute_inventory_health(
@@ -21,6 +53,38 @@ def compute_inventory_health(
         return inventory_df.copy()
 
     df = inventory_df.copy()
+
+    # Dynamic Obsolete SKU Tagging (guarantees obsolete status even with stale cached data)
+    if "is_obsolete" not in df.columns:
+        df["is_obsolete"] = False
+    if "replacement_sku" not in df.columns:
+        df["replacement_sku"] = ""
+
+    legacy_map = {
+        "7391": "AA-PakaloloPOG-I-10mg-10pc-Bag",
+        "7392": "AA-HanaleiHighTide-S-10mg-10pc-Bag",
+        "7393": "AA-LilikoiCitrusBuzz-S-10mg-10pc-Bag",
+        "7394": "AA-HawaiianGuavaHaze-I-10mg-10pc-Bag",
+        "7395": "AA-OGLavaFlow-H-10mg-10pc-Bag",
+    }
+    for idx, row in df.iterrows():
+        sku_val = str(row.get("sku", "")).strip()
+        is_obs = is_obsolete_sku(row)
+        rep = str(row.get("replacement_sku", "") or "")
+
+        for leg, target in legacy_map.items():
+            if sku_val == leg or sku_val.startswith(f"{leg}-"):
+                is_obs = True
+                rep = target
+                break
+        if not rep and is_obs:
+            rep = legacy_map.get(sku_val, "")
+
+        if is_obs:
+            df.at[idx, "is_obsolete"] = True
+            df.at[idx, "replacement_sku"] = rep
+            df.at[idx, "weekly_velocity"] = 0.0
+            df.at[idx, "weeks_on_hand"] = 0.0
     
     # Ensure numeric columns
     numeric_cols = [
@@ -46,6 +110,8 @@ def compute_inventory_health(
     df["daily_velocity"] = df["weekly_velocity"] / 7.0
     
     def calc_weeks_supply(row):
+        if row.get("is_obsolete", False) or is_obsolete_sku(row):
+            return 99.0
         avail = row["units_available"]
         vel = row["weekly_velocity"]
         woh = row.get("weeks_on_hand", 0.0)
@@ -68,7 +134,7 @@ def compute_inventory_health(
     today = datetime.date.today()
 
     def get_reorder_date(row):
-        if row.get("is_obsolete", False):
+        if row.get("is_obsolete", False) or is_obsolete_sku(row):
             rep = row.get("replacement_sku", "")
             return f"Discontinued (Replaced by {rep})" if rep else "Discontinued"
         avail = row["units_available"]
@@ -92,7 +158,7 @@ def compute_inventory_health(
 
     # Status classification
     def classify_status(row):
-        if row.get("is_obsolete", False):
+        if row.get("is_obsolete", False) or is_obsolete_sku(row):
             return "⚪ Discontinued / Superseded"
         avail = row["units_available"]
         if avail <= 0:
@@ -150,6 +216,13 @@ def aggregate_inventory_by_sku(
     if "expiration_date" not in df.columns:
         df["expiration_date"] = "--"
 
+    # Pre-tag obsolete items before aggregation
+    for idx, row in df.iterrows():
+        if is_obsolete_sku(row):
+            df.at[idx, "is_obsolete"] = True
+            df.at[idx, "weekly_velocity"] = 0.0
+            df.at[idx, "weeks_on_hand"] = 0.0
+
     def format_batches(series):
         valid = sorted(list(set(str(b).strip() for b in series if str(b).strip() not in ["--", "nan", "None", ""])))
         return ", ".join(valid) if valid else "--"
@@ -162,8 +235,8 @@ def aggregate_inventory_by_sku(
         "product_name": "first",
         "category": "first",
         "manufacturer": "first",
-        "is_sample": "first",
-        "is_obsolete": "first",
+        "is_sample": "any",
+        "is_obsolete": "any",
         "replacement_sku": "first",
         "units_available": "sum",
         "units_reserved": "sum",

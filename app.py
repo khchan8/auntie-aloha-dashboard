@@ -34,7 +34,7 @@ try:
         parse_nabis_inventory_export,
     )
     from cashflow_engine import generate_13_week_forecast, calculate_cash_runway_metrics
-    from inventory_engine import compute_inventory_health, aggregate_inventory_by_sku
+    from inventory_engine import compute_inventory_health, aggregate_inventory_by_sku, is_obsolete_sku, is_active_commercial_sku
     from qbo_client import QuickBooksClient, parse_qbo_pnl_export, parse_qbo_balance_sheet
 except ImportError:
     from src.data_loader import (
@@ -45,7 +45,7 @@ except ImportError:
         parse_nabis_inventory_export,
     )
     from src.cashflow_engine import generate_13_week_forecast, calculate_cash_runway_metrics
-    from src.inventory_engine import compute_inventory_health, aggregate_inventory_by_sku
+    from src.inventory_engine import compute_inventory_health, aggregate_inventory_by_sku, is_obsolete_sku, is_active_commercial_sku
     from src.qbo_client import QuickBooksClient, parse_qbo_pnl_export, parse_qbo_balance_sheet
 
 LOGO_PATH = os.path.join(BASE_DIR, "assets", "logo.webp")
@@ -183,8 +183,11 @@ if not check_password():
     st.stop()
 
 
-@st.cache_data(ttl=3600)
-def get_dashboard_data():
+APP_DATA_VERSION = "2026.09.13.v6"
+
+
+@st.cache_data(ttl=600)
+def get_dashboard_data(version_tag: str = APP_DATA_VERSION):
     remittance_folder = os.path.join(BASE_DIR, "NABIS REMITTANCES 2025 TO YTD")
     raw_df, summary_df = load_all_nabis_remittances(remittance_folder)
     
@@ -196,12 +199,17 @@ def get_dashboard_data():
     return raw_df, summary_df, budget_data, inventory_df
 
 
-# Load data
-raw_nabis_df, summary_nabis_df, budget_data, initial_inv_df = get_dashboard_data()
+# Load data with automatic cache invalidation
+raw_nabis_df, summary_nabis_df, budget_data, initial_inv_df = get_dashboard_data(APP_DATA_VERSION)
 
-# Initialize session state for inventory if not set
-if "inventory_df" not in st.session_state:
+# Force-synchronize session state inventory with latest loader schema and data version
+if (
+    "inventory_df" not in st.session_state
+    or st.session_state.get("inventory_version") != APP_DATA_VERSION
+    or "is_obsolete" not in st.session_state.inventory_df.columns
+):
     st.session_state.inventory_df = initial_inv_df.copy()
+    st.session_state["inventory_version"] = APP_DATA_VERSION
 
 # ==========================================
 # SIDEBAR CONTROLS
@@ -248,6 +256,8 @@ with st.sidebar:
     
     if st.button("🔄 Refresh Data Cache"):
         st.cache_data.clear()
+        st.session_state.inventory_df = initial_inv_df.copy()
+        st.session_state["inventory_version"] = APP_DATA_VERSION
         st.rerun()
 
 # ==========================================
@@ -438,16 +448,16 @@ with tab_overview:
             unsafe_allow_html=True,
         )
     with col_ins2:
-        # Evaluate active commercial inventory health at aggregate SKU level (excluding samples and obsolete legacy SKUs)
+        # Evaluate active commercial inventory health at aggregate SKU level (strictly excluding samples and obsolete legacy SKUs)
         agg_inv = aggregate_inventory_by_sku(st.session_state.inventory_df)
         if not agg_inv.empty:
-            obs_mask = agg_inv["is_obsolete"] if "is_obsolete" in agg_inv.columns else False
-            active_skus = agg_inv[(agg_inv["units_available"] > 0) & (~agg_inv["is_sample"]) & (~obs_mask)]
+            active_mask = agg_inv.apply(is_active_commercial_sku, axis=1)
+            active_skus = agg_inv[(agg_inv["units_available"] > 0) & active_mask]
             critical_items = active_skus[active_skus["inventory_status"].str.contains("Critical|Reorder Now")]
         else:
             critical_items = pd.DataFrame()
         if not critical_items.empty:
-            crit_names = ", ".join(critical_items["product_name"].head(2).tolist())
+            crit_names = ", ".join(critical_items["product_name"].head(3).tolist())
             min_woh = critical_items["weeks_of_supply"].min()
             st.markdown(
                 f"""
@@ -819,8 +829,8 @@ with tab_inventory:
     raw_inv_df = st.session_state.inventory_df.copy()
     if not include_samples:
         raw_inv_df = raw_inv_df[~raw_inv_df["is_sample"]]
-    if not include_obsolete and "is_obsolete" in raw_inv_df.columns:
-        raw_inv_df = raw_inv_df[~raw_inv_df["is_obsolete"]]
+    if not include_obsolete:
+        raw_inv_df = raw_inv_df[~raw_inv_df.apply(is_obsolete_sku, axis=1)]
 
     # Category filter
     if cat_filter != "All Categories":
