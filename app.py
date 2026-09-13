@@ -12,21 +12,41 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# Setup paths
+# Setup paths - ensure both project root and src/ are in sys.path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
+SRC_DIR = os.path.join(BASE_DIR, "src")
 
-from src.data_loader import (
-    load_all_nabis_remittances,
-    load_budget_cashflow_model,
-    get_default_inventory_data,
-    parse_nabis_remittance_file,
-    parse_nabis_inventory_export,
-)
-from src.cashflow_engine import generate_13_week_forecast, calculate_cash_runway_metrics
-from src.inventory_engine import compute_inventory_health, aggregate_inventory_by_sku
-from src.qbo_client import QuickBooksClient, parse_qbo_pnl_export, parse_qbo_balance_sheet
+for p in [BASE_DIR, SRC_DIR]:
+    if p in sys.path:
+        sys.path.remove(p)
+    sys.path.insert(0, p)
+
+# Prevent Streamlit Cloud /mount/src namespace collision
+if "src" in sys.modules and not hasattr(sys.modules["src"], "data_loader"):
+    del sys.modules["src"]
+
+try:
+    from data_loader import (
+        load_all_nabis_remittances,
+        load_budget_cashflow_model,
+        get_default_inventory_data,
+        parse_nabis_remittance_file,
+        parse_nabis_inventory_export,
+    )
+    from cashflow_engine import generate_13_week_forecast, calculate_cash_runway_metrics
+    from inventory_engine import compute_inventory_health, aggregate_inventory_by_sku
+    from qbo_client import QuickBooksClient, parse_qbo_pnl_export, parse_qbo_balance_sheet
+except ImportError:
+    from src.data_loader import (
+        load_all_nabis_remittances,
+        load_budget_cashflow_model,
+        get_default_inventory_data,
+        parse_nabis_remittance_file,
+        parse_nabis_inventory_export,
+    )
+    from src.cashflow_engine import generate_13_week_forecast, calculate_cash_runway_metrics
+    from src.inventory_engine import compute_inventory_health, aggregate_inventory_by_sku
+    from src.qbo_client import QuickBooksClient, parse_qbo_pnl_export, parse_qbo_balance_sheet
 
 LOGO_PATH = os.path.join(BASE_DIR, "assets", "logo.webp")
 FAVICON_PATH = os.path.join(BASE_DIR, "assets", "favicon.png")
