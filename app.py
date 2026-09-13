@@ -27,10 +27,13 @@ from src.cashflow_engine import generate_13_week_forecast, calculate_cash_runway
 from src.inventory_engine import compute_inventory_health
 from src.qbo_client import QuickBooksClient, parse_qbo_pnl_export, parse_qbo_balance_sheet
 
+LOGO_PATH = os.path.join(BASE_DIR, "assets", "logo.webp")
+FAVICON_PATH = os.path.join(BASE_DIR, "assets", "favicon.png")
+
 # Page configuration
 st.set_page_config(
     page_title="Auntie Aloha | Executive Business Dashboard",
-    page_icon="🌺",
+    page_icon=FAVICON_PATH if os.path.exists(FAVICON_PATH) else "🍍",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -126,15 +129,15 @@ def check_password() -> bool:
         else:
             st.session_state["login_failed"] = True
 
-    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
     _, center_col, _ = st.columns([1, 2, 1])
     with center_col:
+        if os.path.exists(LOGO_PATH):
+            st.image(LOGO_PATH, use_container_width=True)
         st.markdown(
             """
-            <div style="background: white; padding: 2.2rem 2.5rem; border-radius: 16px; border: 1px solid #e2e8f0; box-shadow: 0 10px 25px rgba(0,0,0,0.06); text-align: center;">
-                <div style="font-size: 3rem; margin-bottom: 0.5rem;">🌺</div>
-                <h2 style="color: #1b4332; margin-bottom: 0.2rem; font-weight: 700;">Auntie Aloha</h2>
-                <div style="color: #40916c; font-size: 1rem; margin-bottom: 1.5rem; font-weight: 500;">Business Intelligence & Financial Portal</div>
+            <div style="background: white; padding: 1.8rem 2.2rem; border-radius: 16px; border: 1px solid #e2e8f0; box-shadow: 0 10px 25px rgba(0,0,0,0.06); text-align: center; margin-top: 15px;">
+                <div style="color: #40916c; font-size: 1.05rem; margin-bottom: 1.2rem; font-weight: 600;">Business Intelligence & Financial Portal</div>
                 <div style="background: #f0fdf4; border-left: 4px solid #2d6a4f; padding: 0.8rem 1rem; border-radius: 6px; text-align: left; margin-bottom: 1.5rem; font-size: 0.88rem; color: #166534;">
                     🔒 <b>Restricted Access:</b> This portal contains confidential wholesale remittances, bank cash models, and distributor records. Please enter your team passphrase to continue.
                 </div>
@@ -183,8 +186,11 @@ if "inventory_df" not in st.session_state:
 # SIDEBAR CONTROLS
 # ==========================================
 with st.sidebar:
-    st.markdown("## 🌺 Auntie Aloha")
-    st.markdown("**Business Intelligence Hub**")
+    if os.path.exists(LOGO_PATH):
+        st.image(LOGO_PATH, use_container_width=True)
+    else:
+        st.markdown("## Auntie Aloha")
+    st.markdown("<div style='text-align: center; color: #2d6a4f; font-size: 0.9rem; font-weight: 600; margin-bottom: 12px;'>Operations & Finance Hub</div>", unsafe_allow_html=True)
     if st.button("🔒 Lock Portal / Log Out", use_container_width=True):
         st.session_state["authenticated"] = False
         st.rerun()
@@ -226,7 +232,13 @@ with st.sidebar:
 # ==========================================
 # MAIN DASHBOARD TABS
 # ==========================================
-st.markdown('<div class="main-header">🌺 Auntie Aloha Business Dashboard</div>', unsafe_allow_html=True)
+hdr_col1, hdr_col2 = st.columns([1.2, 4])
+with hdr_col1:
+    if os.path.exists(LOGO_PATH):
+        st.image(LOGO_PATH, width=220)
+with hdr_col2:
+    st.markdown('<div class="main-header" style="margin-top: 8px;">Business Intelligence Dashboard</div>', unsafe_allow_html=True)
+
 st.markdown(
     '<div class="sub-header">Unified Cash Flow Forecasting, Wholesale Sales Realization, Inventory Depletion & Accounting</div>',
     unsafe_allow_html=True,
