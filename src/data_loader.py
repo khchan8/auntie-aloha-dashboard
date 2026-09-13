@@ -443,7 +443,7 @@ def parse_nabis_inventory_export(file_or_buffer) -> pd.DataFrame:
             else:
                 category = "Gummies - Distillate"
                 mfg = "Smoakland"
-                cogs = 2.20
+                cogs = 2.80
                 if unit_price <= 0.05 and not is_sample:
                     unit_price = 6.99
 
@@ -627,9 +627,9 @@ def get_default_inventory_data() -> pd.DataFrame:
             "weekly_velocity": 148,
             "weeks_on_hand": 42,
             "days_of_supply": 294.0,
-            "batch_cost": 2.20,
+            "batch_cost": 2.80,
             "wholesale_price": 6.99,
-            "cogs_valuation": 3436.4,
+            "cogs_valuation": 4373.6,
             "wholesale_valuation": 10918.38,
             "manufacturer": "Smoakland",
             "is_sample": False,
@@ -650,9 +650,9 @@ def get_default_inventory_data() -> pd.DataFrame:
             "weekly_velocity": 100,
             "weeks_on_hand": 55,
             "days_of_supply": 385.0,
-            "batch_cost": 2.20,
+            "batch_cost": 2.80,
             "wholesale_price": 6.99,
-            "cogs_valuation": 2996.4,
+            "cogs_valuation": 3813.6,
             "wholesale_valuation": 9520.38,
             "manufacturer": "Smoakland",
             "is_sample": False,
@@ -673,9 +673,9 @@ def get_default_inventory_data() -> pd.DataFrame:
             "weekly_velocity": 200,
             "weeks_on_hand": 22,
             "days_of_supply": 154.0,
-            "batch_cost": 2.20,
+            "batch_cost": 2.80,
             "wholesale_price": 6.99,
-            "cogs_valuation": 2343.0,
+            "cogs_valuation": 2982.0,
             "wholesale_valuation": 7444.35,
             "manufacturer": "Smoakland",
             "is_sample": False,

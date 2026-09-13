@@ -36,6 +36,13 @@ try:
     from cashflow_engine import generate_13_week_forecast, calculate_cash_runway_metrics
     from inventory_engine import compute_inventory_health, aggregate_inventory_by_sku, is_obsolete_sku, is_active_commercial_sku
     from qbo_client import QuickBooksClient, parse_qbo_pnl_export, parse_qbo_balance_sheet
+    from po_manager import (
+        get_all_purchase_orders,
+        get_po_summary_dataframe,
+        get_po_sku_breakdown_dataframe,
+        get_incoming_units_by_sku,
+        parse_qbo_po_export,
+    )
 except ImportError:
     from src.data_loader import (
         load_all_nabis_remittances,
@@ -47,6 +54,13 @@ except ImportError:
     from src.cashflow_engine import generate_13_week_forecast, calculate_cash_runway_metrics
     from src.inventory_engine import compute_inventory_health, aggregate_inventory_by_sku, is_obsolete_sku, is_active_commercial_sku
     from src.qbo_client import QuickBooksClient, parse_qbo_pnl_export, parse_qbo_balance_sheet
+    from src.po_manager import (
+        get_all_purchase_orders,
+        get_po_summary_dataframe,
+        get_po_sku_breakdown_dataframe,
+        get_incoming_units_by_sku,
+        parse_qbo_po_export,
+    )
 
 LOGO_PATH = os.path.join(BASE_DIR, "assets", "logo.webp")
 FAVICON_PATH = os.path.join(BASE_DIR, "assets", "favicon.png")
@@ -183,7 +197,7 @@ if not check_password():
     st.stop()
 
 
-APP_DATA_VERSION = "2026.09.13.v6"
+APP_DATA_VERSION = "2026.09.13.v7"
 
 
 @st.cache_data(ttl=600)
@@ -832,9 +846,9 @@ with tab_inventory:
                 "Distillate Unit COGS ($)",
                 min_value=0.50,
                 max_value=15.00,
-                value=2.20,
+                value=2.80,
                 step=0.05,
-                help="Unit production cost paid to Smoakland for packaging, distillate oil, and gummy co-packing."
+                help="Unit production cost paid to Smoakland ($2.80/bag as verified in PO 260805, 260311, 260101)."
             )
         with ccol2:
             rosin_cogs = st.number_input(
@@ -859,8 +873,33 @@ with tab_inventory:
                 unsafe_allow_html=True,
             )
 
+        # Pipeline Runway Toggle
+        st.markdown("---")
+        pcol1, pcol2 = st.columns([1.6, 2.4])
+        with pcol1:
+            factor_incoming_po = st.checkbox(
+                "📦 Factor Incoming PO 260805 into Runway",
+                value=True,
+                help="Adds 6,000 pending production units from Smoakland PO 260805 (1,000 units per Distillate SKU) into supply runway projections."
+            )
+        with pcol2:
+            st.caption("When enabled, SKU runway and status account for batches currently in manufacturing/compliance testing at Smoakland.")
+
     # Prepare base data
     raw_inv_df = st.session_state.inventory_df.copy()
+
+    # Map incoming PO units from active Smoakland POs (apply once per SKU to avoid duplicating across batch lots)
+    incoming_map = get_incoming_units_by_sku()
+    seen_po_skus = set()
+    raw_inv_df["incoming_po_units"] = 0.0
+    for idx, row in raw_inv_df.iterrows():
+        sku_val = row.get("sku")
+        if sku_val in incoming_map and sku_val not in seen_po_skus:
+            raw_inv_df.at[idx, "incoming_po_units"] = float(incoming_map[sku_val])
+            seen_po_skus.add(sku_val)
+
+    if factor_incoming_po:
+        raw_inv_df["units_incoming"] = raw_inv_df["units_incoming"] + raw_inv_df["incoming_po_units"]
 
     # Apply user-selected COGS dynamically to inventory
     if "batch_cost" in raw_inv_df.columns:
@@ -896,12 +935,15 @@ with tab_inventory:
     tot_weekly_burn = active_display_df["weekly_velocity"].sum() if not active_display_df.empty else 0.0
     overall_woh = (tot_avail_units / tot_weekly_burn) if tot_weekly_burn > 0 else 0.0
 
-    km1, km2, km3, km4, km5 = st.columns(5)
+    tot_incoming_units = active_display_df["units_incoming"].sum() if "units_incoming" in active_display_df.columns else 0.0
+
+    km1, km2, km3, km4, km5, km6 = st.columns(6)
     km1.metric("Available In Stock", f"{int(tot_avail_units):,} Units")
-    km2.metric("Wholesale Valuation", f"${tot_whs_val:,.2f}")
-    km3.metric("Inventory COGS Value", f"${tot_cogs_val:,.2f}")
-    km4.metric("Weekly Burn Rate", f"{int(tot_weekly_burn):,} Units/Wk")
-    km5.metric("Brand Overall Runway", f"{overall_woh:.1f} Weeks")
+    km2.metric("Incoming PO Units", f"+{int(tot_incoming_units):,} Bags" if tot_incoming_units > 0 else "0 Bags", help="Units in production from Smoakland PO 260805")
+    km3.metric("Wholesale Valuation", f"${tot_whs_val:,.2f}")
+    km4.metric("Inventory COGS Value", f"${tot_cogs_val:,.2f}", help=f"Valuation at ${distillate_cogs:.2f} Distillate / ${rosin_cogs:.2f} Rosin")
+    km5.metric("Weekly Burn Rate", f"{int(tot_weekly_burn):,} Units/Wk")
+    km6.metric("Brand Overall Runway", f"{overall_woh:.1f} Weeks")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -957,24 +999,27 @@ with tab_inventory:
         # VISUAL CHARTS ROW 2: Weeks of Supply Runway & Velocity Depletion Matrix
         ch_col3, ch_col4 = st.columns([1.2, 1.2])
         with ch_col3:
-            st.markdown("#### ⏳ Weeks of Supply Remaining (Depletion Runway)")
+            y_runway_col = "pipeline_weeks_of_supply" if (factor_incoming_po and "pipeline_weeks_of_supply" in active_display_df.columns) else "weeks_of_supply"
+            chart_title = "#### ⏳ Weeks of Supply Remaining (Pipeline: Stock + PO 260805)" if factor_incoming_po else "#### ⏳ Weeks of Supply Remaining (Warehouse On-Hand Only)"
+            st.markdown(chart_title)
             status_color_map = {
                 "🔴 Critical Stockout Risk": "#dc3545",
                 "🟡 Reorder Now (In Lead-Time)": "#ffc107",
+                "🟢 Covered by Incoming PO": "#10b981",
                 "🟢 Healthy Stock": "#28a745",
                 "🔵 Well Stocked": "#17a2b8",
                 "⚪ Discontinued / Superseded": "#94a3b8",
                 "⚫ Depleted / Out of Stock": "#6c757d",
             }
-            sorted_woh_df = active_display_df.sort_values("weeks_of_supply", ascending=False)
+            sorted_woh_df = active_display_df.sort_values(y_runway_col, ascending=False)
             fig_runway = px.bar(
                 sorted_woh_df,
                 x="product_name",
-                y="weeks_of_supply",
+                y=y_runway_col,
                 color="inventory_status",
                 color_discrete_map=status_color_map,
-                text="weeks_of_supply",
-                labels={"weeks_of_supply": "Weeks on Hand", "product_name": "SKU", "inventory_status": "Health Status"},
+                text=y_runway_col,
+                labels={y_runway_col: "Weeks of Supply", "product_name": "SKU", "inventory_status": "Health Status"},
             )
             fig_runway.update_traces(texttemplate="%{text:.1f} wks", textposition="outside")
             fig_runway.add_hline(
@@ -1039,9 +1084,10 @@ with tab_inventory:
                 "category",
                 "manufacturer",
                 "units_available",
+                "units_incoming",
                 "weekly_velocity",
                 "weeks_of_supply",
-                "days_of_supply",
+                "pipeline_weeks_of_supply",
                 "wholesale_price",
                 "wholesale_valuation",
                 "inventory_status",
@@ -1055,10 +1101,11 @@ with tab_inventory:
                 "product_name": "Product Name",
                 "category": "Category",
                 "manufacturer": "Co-Packer",
-                "units_available": "Avail Units",
+                "units_available": "Avail (On Hand)",
+                "units_incoming": "Incoming PO",
                 "weekly_velocity": "Weekly Burn",
-                "weeks_of_supply": "Weeks on Hand",
-                "days_of_supply": "Days Supply",
+                "weeks_of_supply": "On-Hand Runway",
+                "pipeline_weeks_of_supply": "Pipeline Runway",
                 "wholesale_price": "Unit Price",
                 "wholesale_valuation": "Wholesale Value",
                 "inventory_status": "Status",
@@ -1071,14 +1118,16 @@ with tab_inventory:
                 styled_tbl["Unit Price"] = styled_tbl["Unit Price"].apply(lambda x: f"${x:,.2f}")
             if "Wholesale Value" in styled_tbl.columns:
                 styled_tbl["Wholesale Value"] = styled_tbl["Wholesale Value"].apply(lambda x: f"${x:,.2f}")
-            if "Avail Units" in styled_tbl.columns:
-                styled_tbl["Avail Units"] = styled_tbl["Avail Units"].apply(lambda x: f"{int(x):,}")
+            if "Avail (On Hand)" in styled_tbl.columns:
+                styled_tbl["Avail (On Hand)"] = styled_tbl["Avail (On Hand)"].apply(lambda x: f"{int(x):,}")
+            if "Incoming PO" in styled_tbl.columns:
+                styled_tbl["Incoming PO"] = styled_tbl["Incoming PO"].apply(lambda x: f"+{int(x):,}" if x > 0 else "--")
             if "Weekly Burn" in styled_tbl.columns:
                 styled_tbl["Weekly Burn"] = styled_tbl["Weekly Burn"].apply(lambda x: f"{int(x):,}")
-            if "Weeks on Hand" in styled_tbl.columns:
-                styled_tbl["Weeks on Hand"] = styled_tbl["Weeks on Hand"].apply(lambda x: f"{x:.1f} wks")
-            if "Days Supply" in styled_tbl.columns:
-                styled_tbl["Days Supply"] = styled_tbl["Days Supply"].apply(lambda x: f"{x:.0f} d")
+            if "On-Hand Runway" in styled_tbl.columns:
+                styled_tbl["On-Hand Runway"] = styled_tbl["On-Hand Runway"].apply(lambda x: f"{x:.1f} wks")
+            if "Pipeline Runway" in styled_tbl.columns:
+                styled_tbl["Pipeline Runway"] = styled_tbl["Pipeline Runway"].apply(lambda x: f"{x:.1f} wks")
 
             st.dataframe(styled_tbl, use_container_width=True, hide_index=True)
         else:
@@ -1140,6 +1189,72 @@ with tab_inventory:
                 st.session_state.inventory_df[col] = edited_inv[col]
             st.success("Inventory updated successfully!")
             st.rerun()
+
+    # ==========================================
+    # PURCHASE ORDERS & PRODUCTION PIPELINE
+    # ==========================================
+    st.markdown("---")
+    st.markdown("### 📦 Purchase Orders & Production Pipeline (Smoakland)")
+    st.markdown(
+        "Visibility into manufacturing purchase orders placed with Smoakland. Tracks ordered quantities, unit COGS ($2.80/bag), compliance testing fees ($550/test), and incoming fulfillment status."
+    )
+
+    po_summary = get_po_summary_dataframe()
+    po_active = po_summary[po_summary["Status"].str.contains("Incoming|Production", case=False)]
+
+    tot_active_units = po_active["Total Units"].sum() if not po_active.empty else 0
+    tot_active_cost = po_active["Grand Total"].sum() if not po_active.empty else 0.0
+    tot_active_whs = tot_active_units * 6.99
+    active_po_num = po_active.iloc[0]["PO Number"] if not po_active.empty else "None"
+
+    pk1, pk2, pk3, pk4 = st.columns(4)
+    pk1.metric(
+        "Active Production PO",
+        f"{active_po_num}",
+        "Smoakland Co-Packing"
+    )
+    pk2.metric(
+        "Incoming Bags to Nabis",
+        f"{int(tot_active_units):,} Units",
+        "+1,000 bags / SKU"
+    )
+    pk3.metric(
+        "Production Commitment",
+        f"${tot_active_cost:,.2f}",
+        "Includes $3,300 Testing"
+    )
+    pk4.metric(
+        "Incoming Wholesale Value",
+        f"${tot_active_whs:,.2f}",
+        "@ $6.99 / bag wholesale"
+    )
+
+    po_tab1, po_tab2 = st.tabs(["📋 Purchase Order Master Schedule", "🔍 Detailed SKU Breakdown by PO"])
+    with po_tab1:
+        styled_po_sum = po_summary.copy()
+        for c_curr in ["Unit COGS", "Production Cost", "Testing Fees", "Grand Total"]:
+            if c_curr in styled_po_sum.columns:
+                styled_po_sum[c_curr] = styled_po_sum[c_curr].apply(lambda x: f"${x:,.2f}")
+        if "Total Units" in styled_po_sum.columns:
+            styled_po_sum["Total Units"] = styled_po_sum["Total Units"].apply(lambda x: f"{int(x):,}")
+        st.dataframe(styled_po_sum, use_container_width=True, hide_index=True)
+
+    with po_tab2:
+        po_options = po_summary["PO Number"].tolist()
+        po_choice = st.selectbox(
+            "Select Purchase Order to Inspect Line Items:",
+            po_options,
+            index=len(po_options) - 1,
+        )
+        itemized_df = get_po_sku_breakdown_dataframe(po_choice)
+        styled_itemized = itemized_df.copy()
+        if "Units Ordered" in styled_itemized.columns:
+            styled_itemized["Units Ordered"] = styled_itemized["Units Ordered"].apply(lambda x: f"{int(x):,}")
+        if "Unit Rate" in styled_itemized.columns:
+            styled_itemized["Unit Rate"] = styled_itemized["Unit Rate"].apply(lambda x: f"${x:,.2f}")
+        if "Line Total" in styled_itemized.columns:
+            styled_itemized["Line Total"] = styled_itemized["Line Total"].apply(lambda x: f"${x:,.2f}")
+        st.dataframe(styled_itemized, use_container_width=True, hide_index=True)
 
 
 # -----------------------------------------------------------------------------
@@ -1291,6 +1406,24 @@ with tab_upload:
                     st.warning("Could not automatically identify standard P&L sections in this sheet.")
             except Exception as e:
                 st.error(f"Error reading QBO file: {e}")
+
+        st.markdown("### 📋 Upload QuickBooks Purchase Order Export")
+        uploaded_qbo_po = st.file_uploader(
+            "Upload QBO Open Purchase Order Detail (.xlsx)",
+            type=["xlsx", "xls"],
+            key="up_qbo_po",
+            help="Exports from QuickBooks: Reports -> Open Purchase Order Detail (or Purchases by Product/Service Detail)"
+        )
+        if uploaded_qbo_po:
+            try:
+                qbo_po_df = parse_qbo_po_export(uploaded_qbo_po)
+                if not qbo_po_df.empty:
+                    st.success(f"✅ Parsed {len(qbo_po_df)} Purchase Order lines from QuickBooks!")
+                    st.dataframe(qbo_po_df.head(10), use_container_width=True)
+                else:
+                    st.warning("Could not automatically identify standard PO lines in this sheet.")
+            except Exception as e:
+                st.error(f"Error reading QBO PO file: {e}")
 
         st.markdown("### 🔗 QuickBooks Developer API Status")
         qbo_client = QuickBooksClient()

@@ -127,7 +127,19 @@ def compute_inventory_health(
         w = calc_weeks_supply(row)
         return round(w * 7.0, 1)
 
+    def calc_pipeline_weeks_supply(row):
+        if row.get("is_obsolete", False) or is_obsolete_sku(row):
+            return 99.0
+        tot = row["units_available"] + row.get("units_incoming", 0.0)
+        vel = row["weekly_velocity"]
+        if tot <= 0:
+            return 0.0
+        if vel > 0:
+            return round(tot / vel, 1)
+        return 99.0
+
     df["weeks_of_supply"] = df.apply(calc_weeks_supply, axis=1)
+    df["pipeline_weeks_of_supply"] = df.apply(calc_pipeline_weeks_supply, axis=1)
     df["days_of_supply"] = df.apply(calc_days_supply, axis=1)
 
     # Days until reorder must be initiated
@@ -139,10 +151,14 @@ def compute_inventory_health(
             return f"Discontinued (Replaced by {rep})" if rep else "Discontinued"
         avail = row["units_available"]
         vel = row["weekly_velocity"]
-        if avail <= 0:
+        inc = row.get("units_incoming", 0.0)
+        pipe_w = row.get("pipeline_weeks_of_supply", 0.0)
+        if avail <= 0 and inc <= 0:
             return "Out of Stock"
         if vel <= 0:
             return "No Active Velocity"
+        if inc > 0 and pipe_w >= (lead_time_weeks + safety_stock_weeks):
+            return "PO Placed (In Production)"
         
         daily_vel = vel / 7.0
         # days until stock hits safety stock
@@ -161,13 +177,20 @@ def compute_inventory_health(
         if row.get("is_obsolete", False) or is_obsolete_sku(row):
             return "⚪ Discontinued / Superseded"
         avail = row["units_available"]
-        if avail <= 0:
+        inc = row.get("units_incoming", 0.0)
+        if avail <= 0 and inc <= 0:
             return "⚫ Depleted / Out of Stock"
         
         w = row["weeks_of_supply"]
+        pipe_w = row.get("pipeline_weeks_of_supply", w)
+
         if w < lead_time_weeks:
+            if pipe_w >= (lead_time_weeks + safety_stock_weeks):
+                return "🟢 Covered by Incoming PO"
             return "🔴 Critical Stockout Risk"
         elif w < (lead_time_weeks + safety_stock_weeks):
+            if pipe_w >= (lead_time_weeks + safety_stock_weeks):
+                return "🟢 Covered by Incoming PO"
             return "🟡 Reorder Now (In Lead-Time)"
         elif w <= 25:
             return "🟢 Healthy Stock"
@@ -241,6 +264,8 @@ def aggregate_inventory_by_sku(
         "units_available": "sum",
         "units_reserved": "sum",
         "units_on_hand": "sum",
+        "units_incoming": "sum",
+        "units_quarantined": "sum",
         "weekly_velocity": "max",
         "weeks_on_hand": "max",
         "batch_cost": "first",
