@@ -463,21 +463,47 @@ def parse_nabis_inventory_export(file_or_buffer) -> pd.DataFrame:
             else:
                 warehouse = "Woodlake Hub"
 
-            # Compute depletion and status
-            days_supply = round(woh_val * 7.0, 1) if woh_val > 0 else (round(avail_units / (weekly_vel / 7.0), 1) if weekly_vel > 0 else 0.0)
-            if woh_val == 0.0 and weekly_vel > 0:
-                woh_val = round(avail_units / weekly_vel, 1)
+            # Obsolete / Superseded SKU Detection (e.g. 7391, 7395 replaced by alphanumeric AA-* SKUs)
+            clean_sku = sku.strip()
+            legacy_sku_map = {
+                "7391": "AA-PakaloloPOG-I-10mg-10pc-Bag",
+                "7392": "AA-HanaleiHighTide-S-10mg-10pc-Bag",
+                "7393": "AA-LilikoiCitrusBuzz-S-10mg-10pc-Bag",
+                "7394": "AA-HawaiianGuavaHaze-I-10mg-10pc-Bag",
+                "7395": "AA-OGLavaFlow-H-10mg-10pc-Bag",
+            }
+            is_obsolete = False
+            replacement_sku = ""
+            for leg_code, rep_code in legacy_sku_map.items():
+                if clean_sku == leg_code or clean_sku.startswith(f"{leg_code}-") or clean_sku.startswith(leg_code):
+                    is_obsolete = True
+                    replacement_sku = rep_code
+                    break
+            if not is_obsolete and bool(re.match(r"^739\d", clean_sku)):
+                is_obsolete = True
 
-            if avail_units == 0:
-                status = "⚫ Out of Stock / Depleted"
-            elif woh_val < 5:
-                status = "🔴 Critical Stockout Risk"
-            elif woh_val < 8:
-                status = "🟡 Reorder Soon (Lead-Time)"
-            elif woh_val <= 25:
-                status = "🟢 Healthy Stock"
+            # If obsolete, zero out reorder velocity so it does not trigger false stockout alerts
+            if is_obsolete:
+                weekly_vel = 0.0
+                woh_val = 0.0
+                days_supply = 0.0
+                status = "⚪ Discontinued / Superseded"
             else:
-                status = "🔵 Well Stocked"
+                # Compute depletion and status
+                days_supply = round(woh_val * 7.0, 1) if woh_val > 0 else (round(avail_units / (weekly_vel / 7.0), 1) if weekly_vel > 0 else 0.0)
+                if woh_val == 0.0 and weekly_vel > 0:
+                    woh_val = round(avail_units / weekly_vel, 1)
+
+                if avail_units == 0:
+                    status = "⚫ Out of Stock / Depleted"
+                elif woh_val < 5:
+                    status = "🔴 Critical Stockout Risk"
+                elif woh_val < 8:
+                    status = "🟡 Reorder Soon (Lead-Time)"
+                elif woh_val <= 25:
+                    status = "🟢 Healthy Stock"
+                else:
+                    status = "🔵 Well Stocked"
 
             records.append({
                 "sku": sku,
@@ -500,6 +526,8 @@ def parse_nabis_inventory_export(file_or_buffer) -> pd.DataFrame:
                 "wholesale_valuation": round(avail_units * unit_price, 2),
                 "manufacturer": mfg,
                 "is_sample": is_sample,
+                "is_obsolete": is_obsolete,
+                "replacement_sku": replacement_sku,
                 "inventory_status": status,
             })
 

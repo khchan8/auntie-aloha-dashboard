@@ -438,10 +438,14 @@ with tab_overview:
             unsafe_allow_html=True,
         )
     with col_ins2:
-        # Evaluate active commercial inventory health at aggregate SKU level
+        # Evaluate active commercial inventory health at aggregate SKU level (excluding samples and obsolete legacy SKUs)
         agg_inv = aggregate_inventory_by_sku(st.session_state.inventory_df)
-        active_skus = agg_inv[(agg_inv["units_available"] > 0) & (~agg_inv["is_sample"])] if not agg_inv.empty else pd.DataFrame()
-        critical_items = active_skus[active_skus["inventory_status"].str.contains("Critical|Reorder Now")] if not active_skus.empty else pd.DataFrame()
+        if not agg_inv.empty:
+            obs_mask = agg_inv["is_obsolete"] if "is_obsolete" in agg_inv.columns else False
+            active_skus = agg_inv[(agg_inv["units_available"] > 0) & (~agg_inv["is_sample"]) & (~obs_mask)]
+            critical_items = active_skus[active_skus["inventory_status"].str.contains("Critical|Reorder Now")]
+        else:
+            critical_items = pd.DataFrame()
         if not critical_items.empty:
             crit_names = ", ".join(critical_items["product_name"].head(2).tolist())
             min_woh = critical_items["weeks_of_supply"].min()
@@ -778,7 +782,7 @@ with tab_inventory:
 
     # Top Control & Filter Bar
     with st.expander("⚙️ Production Planning & SKU Filter Settings", expanded=True):
-        fcol1, fcol2, fcol3, fcol4 = st.columns([1.5, 1.2, 1.2, 1.1])
+        fcol1, fcol2, fcol3, fcol4, fcol5 = st.columns([1.4, 1.1, 1.1, 1.0, 1.2])
         with fcol1:
             view_mode = st.radio(
                 "View Mode",
@@ -797,7 +801,9 @@ with tab_inventory:
                 ["Active Stock (> 0 Units)", "All SKUs (Including Depleted)", "Depleted / Out of Stock"],
             )
         with fcol4:
-            include_samples = st.checkbox("Include Sample SKUs ($0.01)", value=False, help="Show promotional sample units")
+            include_samples = st.checkbox("Include Samples ($0.01)", value=False, help="Show promotional sample units")
+        with fcol5:
+            include_obsolete = st.checkbox("Include Obsolete (739X)", value=False, help="Show legacy discontinued SKUs superseded by active 10mg lines")
 
         # Lead Time & Buffer Sliders
         scol1, scol2, scol3 = st.columns(3)
@@ -813,6 +819,8 @@ with tab_inventory:
     raw_inv_df = st.session_state.inventory_df.copy()
     if not include_samples:
         raw_inv_df = raw_inv_df[~raw_inv_df["is_sample"]]
+    if not include_obsolete and "is_obsolete" in raw_inv_df.columns:
+        raw_inv_df = raw_inv_df[~raw_inv_df["is_obsolete"]]
 
     # Category filter
     if cat_filter != "All Categories":
@@ -904,6 +912,7 @@ with tab_inventory:
                 "🟡 Reorder Now (In Lead-Time)": "#ffc107",
                 "🟢 Healthy Stock": "#28a745",
                 "🔵 Well Stocked": "#17a2b8",
+                "⚪ Discontinued / Superseded": "#94a3b8",
                 "⚫ Depleted / Out of Stock": "#6c757d",
             }
             sorted_woh_df = active_display_df.sort_values("weeks_of_supply", ascending=False)

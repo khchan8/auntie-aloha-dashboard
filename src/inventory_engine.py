@@ -68,6 +68,9 @@ def compute_inventory_health(
     today = datetime.date.today()
 
     def get_reorder_date(row):
+        if row.get("is_obsolete", False):
+            rep = row.get("replacement_sku", "")
+            return f"Discontinued (Replaced by {rep})" if rep else "Discontinued"
         avail = row["units_available"]
         vel = row["weekly_velocity"]
         if avail <= 0:
@@ -89,6 +92,8 @@ def compute_inventory_health(
 
     # Status classification
     def classify_status(row):
+        if row.get("is_obsolete", False):
+            return "⚪ Discontinued / Superseded"
         avail = row["units_available"]
         if avail <= 0:
             return "⚫ Depleted / Out of Stock"
@@ -136,6 +141,10 @@ def aggregate_inventory_by_sku(
         df["manufacturer"] = "Standard"
     if "is_sample" not in df.columns:
         df["is_sample"] = False
+    if "is_obsolete" not in df.columns:
+        df["is_obsolete"] = False
+    if "replacement_sku" not in df.columns:
+        df["replacement_sku"] = ""
     if "batch_code" not in df.columns:
         df["batch_code"] = "--"
     if "expiration_date" not in df.columns:
@@ -154,6 +163,8 @@ def aggregate_inventory_by_sku(
         "category": "first",
         "manufacturer": "first",
         "is_sample": "first",
+        "is_obsolete": "first",
+        "replacement_sku": "first",
         "units_available": "sum",
         "units_reserved": "sum",
         "units_on_hand": "sum",
