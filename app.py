@@ -825,8 +825,49 @@ with tab_inventory:
             total_lead_horizon = lead_time_val + safety_stock_val
             st.metric("Total Reorder Horizon", f"{total_lead_horizon} Weeks", help=f"Orders must be scheduled when stock reaches {total_lead_horizon} weeks of supply.")
 
+        # Unit COGS & Product Margin Settings
+        ccol1, ccol2, ccol3 = st.columns(3)
+        with ccol1:
+            distillate_cogs = st.number_input(
+                "Distillate Unit COGS ($)",
+                min_value=0.50,
+                max_value=15.00,
+                value=2.20,
+                step=0.05,
+                help="Unit production cost paid to Smoakland for packaging, distillate oil, and gummy co-packing."
+            )
+        with ccol2:
+            rosin_cogs = st.number_input(
+                "Solventless Rosin Unit COGS ($)",
+                min_value=0.50,
+                max_value=25.00,
+                value=3.80,
+                step=0.05,
+                help="Unit production cost paid to MyGreen Network for live rosin solventless gummies."
+            )
+        with ccol3:
+            dist_margin = ((6.99 - distillate_cogs) / 6.99 * 100) if distillate_cogs > 0 else 0
+            ros_margin = ((9.00 - rosin_cogs) / 9.00 * 100) if rosin_cogs > 0 else 0
+            st.markdown(
+                f"""
+                <div style="font-size: 0.85rem; color: #4b5563; padding-top: 15px;">
+                    <b>Unit Margins:</b><br>
+                    • Distillate ($6.99): <b>{dist_margin:.1f}%</b> (${6.99 - distillate_cogs:.2f}/unit)<br>
+                    • Rosin ($9.00): <b>{ros_margin:.1f}%</b> (${9.00 - rosin_cogs:.2f}/unit)
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
     # Prepare base data
     raw_inv_df = st.session_state.inventory_df.copy()
+
+    # Apply user-selected COGS dynamically to inventory
+    if "batch_cost" in raw_inv_df.columns:
+        is_rosin = raw_inv_df["category"].str.contains("Rosin|Solventless", case=False, na=False)
+        raw_inv_df.loc[is_rosin, "batch_cost"] = rosin_cogs
+        raw_inv_df.loc[~is_rosin, "batch_cost"] = distillate_cogs
+
     if not include_samples:
         raw_inv_df = raw_inv_df[~raw_inv_df["is_sample"]]
     if not include_obsolete:
