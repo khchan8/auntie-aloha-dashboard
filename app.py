@@ -442,7 +442,7 @@ with tab_overview:
             f"""
             <div class="alert-banner">
                 <b>📌 True Nabis Realization Rate is {realization_rate:.1f}%</b><br>
-                While the original cashflow model estimated distribution costs at 28%, actual historical Nabis fee deductions average <b>{(100 - realization_rate):.1f}%</b>. This difference is driven by fixed minimum delivery charges, recurring <b>$780.15 monthly software subscription fees</b>, fuel surcharges, and sample trade orders.
+                Actual historical Nabis fee deductions average <b>{(100 - realization_rate):.1f}%</b>. This deduction is driven by fixed minimum delivery charges, recurring <b>$780.15 monthly software subscription fees</b>, fuel surcharges, and sample trade orders.
             </div>
             """,
             unsafe_allow_html=True,
