@@ -207,7 +207,7 @@ if not check_password():
     st.stop()
 
 
-APP_DATA_VERSION = "2026.09.13.v8"
+APP_DATA_VERSION = "2026.09.13.v9"
 
 
 @st.cache_data(ttl=600)
@@ -986,11 +986,11 @@ with tab_inventory:
     tot_incoming_units = active_display_df["units_incoming"].sum() if "units_incoming" in active_display_df.columns else 0.0
 
     km1, km2, km3, km4, km5, km6 = st.columns(6)
-    km1.metric("Available In Stock", f"{int(tot_avail_units):,} Units")
-    km2.metric("Incoming PO Units", f"+{int(tot_incoming_units):,} Bags" if tot_incoming_units > 0 else "0 Bags", help="Units in production from Smoakland PO 260805")
+    km1.metric("Available In Stock", f"{int(tot_avail_units):,} Bags")
+    km2.metric("Incoming PO Pipeline", f"+{int(tot_incoming_units):,} Bags" if tot_incoming_units > 0 else "0 Bags", help="Bags currently in production from Smoakland PO 260805")
     km3.metric("Wholesale Valuation", f"${tot_whs_val:,.2f}")
-    km4.metric("Inventory COGS Value", f"${tot_cogs_val:,.2f}", help=f"Valuation at ${distillate_cogs:.2f} Distillate / ${rosin_cogs:.2f} Rosin")
-    km5.metric("Weekly Burn Rate", f"{int(tot_weekly_burn):,} Units/Wk")
+    km4.metric("Inventory COGS Value", f"${tot_cogs_val:,.2f}", help=f"Valuation at ${distillate_cogs:.2f} Distillate / ${rosin_cogs:.2f} Rosin per bag")
+    km5.metric("Weekly Sales Burn", f"{int(tot_weekly_burn):,} Bags/Wk", help="Based on Nabis trailing 4-week dispensary shipments average")
     km6.metric("Brand Overall Runway", f"{overall_woh:.1f} Weeks")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -999,7 +999,7 @@ with tab_inventory:
         # VISUAL CHARTS ROW 1: Stock by SKU & Valuation Share
         ch_col1, ch_col2 = st.columns([1.3, 1])
         with ch_col1:
-            st.markdown("#### 📊 Available Units by SKU")
+            st.markdown("#### 📊 Available Bags by SKU")
             sorted_units_df = active_display_df.sort_values("units_available", ascending=True)
             fig_units = px.bar(
                 sorted_units_df,
@@ -1013,9 +1013,9 @@ with tab_inventory:
                 },
                 text="units_available",
                 hover_data={"wholesale_valuation": ":$,.2f", "weekly_velocity": True, "product_name": False},
-                labels={"units_available": "Units Available", "product_name": "Product SKU", "category": "Product Line"},
+                labels={"units_available": "Available Bags", "product_name": "Product SKU", "category": "Product Line"},
             )
-            fig_units.update_traces(texttemplate="%{text:,.0f} units", textposition="inside")
+            fig_units.update_traces(texttemplate="%{text:,.0f} bags", textposition="inside")
             fig_units.update_layout(
                 height=380,
                 margin=dict(l=10, r=20, t=20, b=30),
@@ -1100,7 +1100,7 @@ with tab_inventory:
                     "Gummies - Distillate": "#e76f51",
                 },
                 text="product_name",
-                labels={"weekly_velocity": "Weekly Velocity (Units/Wk)", "units_available": "Units Available", "category": "Line"},
+                labels={"weekly_velocity": "Weekly Sales Burn (Bags/Wk)", "units_available": "Available Bags", "category": "Line"},
                 hover_data={"wholesale_valuation": ":$,.2f", "weeks_of_supply": ":.1f wks"},
             )
             fig_scatter.update_traces(textposition="top center")
@@ -1149,12 +1149,12 @@ with tab_inventory:
                 "product_name": "Product Name",
                 "category": "Category",
                 "manufacturer": "Co-Packer",
-                "units_available": "Avail (On Hand)",
-                "units_incoming": "Incoming PO",
-                "weekly_velocity": "Weekly Burn",
+                "units_available": "Avail Bags (On Hand)",
+                "units_incoming": "Incoming Bags (PO)",
+                "weekly_velocity": "Weekly Burn (Bags/Wk)",
                 "weeks_of_supply": "On-Hand Runway",
                 "pipeline_weeks_of_supply": "Pipeline Runway",
-                "wholesale_price": "Unit Price",
+                "wholesale_price": "Price / Bag",
                 "wholesale_valuation": "Wholesale Value",
                 "inventory_status": "Status",
                 "reorder_trigger_date": "Target Reorder Date",
@@ -1162,16 +1162,16 @@ with tab_inventory:
                 "expiration_date": "Earliest Expiration",
             }
             styled_tbl = tbl_df[valid_cols].rename(columns=rename_dict).copy()
-            if "Unit Price" in styled_tbl.columns:
-                styled_tbl["Unit Price"] = styled_tbl["Unit Price"].apply(lambda x: f"${x:,.2f}")
+            if "Price / Bag" in styled_tbl.columns:
+                styled_tbl["Price / Bag"] = styled_tbl["Price / Bag"].apply(lambda x: f"${x:,.2f}")
             if "Wholesale Value" in styled_tbl.columns:
                 styled_tbl["Wholesale Value"] = styled_tbl["Wholesale Value"].apply(lambda x: f"${x:,.2f}")
-            if "Avail (On Hand)" in styled_tbl.columns:
-                styled_tbl["Avail (On Hand)"] = styled_tbl["Avail (On Hand)"].apply(lambda x: f"{int(x):,}")
-            if "Incoming PO" in styled_tbl.columns:
-                styled_tbl["Incoming PO"] = styled_tbl["Incoming PO"].apply(lambda x: f"+{int(x):,}" if x > 0 else "--")
-            if "Weekly Burn" in styled_tbl.columns:
-                styled_tbl["Weekly Burn"] = styled_tbl["Weekly Burn"].apply(lambda x: f"{int(x):,}")
+            if "Avail Bags (On Hand)" in styled_tbl.columns:
+                styled_tbl["Avail Bags (On Hand)"] = styled_tbl["Avail Bags (On Hand)"].apply(lambda x: f"{int(x):,}")
+            if "Incoming Bags (PO)" in styled_tbl.columns:
+                styled_tbl["Incoming Bags (PO)"] = styled_tbl["Incoming Bags (PO)"].apply(lambda x: f"+{int(x):,}" if x > 0 else "--")
+            if "Weekly Burn (Bags/Wk)" in styled_tbl.columns:
+                styled_tbl["Weekly Burn (Bags/Wk)"] = styled_tbl["Weekly Burn (Bags/Wk)"].apply(lambda x: f"{int(x):,}")
             if "On-Hand Runway" in styled_tbl.columns:
                 styled_tbl["On-Hand Runway"] = styled_tbl["On-Hand Runway"].apply(lambda x: f"{x:.1f} wks")
             if "Pipeline Runway" in styled_tbl.columns:
@@ -1201,26 +1201,26 @@ with tab_inventory:
                 "warehouse": "Warehouse Facility",
                 "batch_code": "Batch / Lot Code",
                 "expiration_date": "Expiration Date",
-                "units_available": "Available",
-                "units_reserved": "Packed/Reserved",
-                "units_on_hand": "Total Count",
-                "weekly_velocity": "4-Wk Avg Velocity",
+                "units_available": "Available (Bags)",
+                "units_reserved": "Packed/Reserved (Bags)",
+                "units_on_hand": "Total Bags",
+                "weekly_velocity": "4-Wk Avg Burn (Bags/Wk)",
                 "weeks_of_supply": "Weeks on Hand",
-                "wholesale_price": "Price",
+                "wholesale_price": "Price / Bag",
                 "wholesale_valuation": "Wholesale Valuation",
                 "inventory_status": "Status",
             }
             styled_tbl = tbl_df[valid_cols].rename(columns=rename_dict).copy()
-            if "Price" in styled_tbl.columns:
-                styled_tbl["Price"] = styled_tbl["Price"].apply(lambda x: f"${x:,.2f}")
+            if "Price / Bag" in styled_tbl.columns:
+                styled_tbl["Price / Bag"] = styled_tbl["Price / Bag"].apply(lambda x: f"${x:,.2f}")
             if "Wholesale Valuation" in styled_tbl.columns:
                 styled_tbl["Wholesale Valuation"] = styled_tbl["Wholesale Valuation"].apply(lambda x: f"${x:,.2f}")
-            if "Available" in styled_tbl.columns:
-                styled_tbl["Available"] = styled_tbl["Available"].apply(lambda x: f"{int(x):,}")
-            if "Packed/Reserved" in styled_tbl.columns:
-                styled_tbl["Packed/Reserved"] = styled_tbl["Packed/Reserved"].apply(lambda x: f"{int(x):,}")
-            if "Total Count" in styled_tbl.columns:
-                styled_tbl["Total Count"] = styled_tbl["Total Count"].apply(lambda x: f"{int(x):,}")
+            if "Available (Bags)" in styled_tbl.columns:
+                styled_tbl["Available (Bags)"] = styled_tbl["Available (Bags)"].apply(lambda x: f"{int(x):,}")
+            if "Packed/Reserved (Bags)" in styled_tbl.columns:
+                styled_tbl["Packed/Reserved (Bags)"] = styled_tbl["Packed/Reserved (Bags)"].apply(lambda x: f"{int(x):,}")
+            if "Total Bags" in styled_tbl.columns:
+                styled_tbl["Total Bags"] = styled_tbl["Total Bags"].apply(lambda x: f"{int(x):,}")
 
             st.dataframe(styled_tbl, use_container_width=True, hide_index=True)
 
@@ -1250,7 +1250,8 @@ with tab_inventory:
     po_summary = get_po_summary_dataframe()
     po_active = po_summary[po_summary["Status"].str.contains("Incoming|Production", case=False)]
 
-    tot_active_units = po_active["Total Units"].sum() if not po_active.empty else 0
+    unit_col = "Total Bags" if "Total Bags" in po_active.columns else "Total Units"
+    tot_active_units = po_active[unit_col].sum() if not po_active.empty else 0
     tot_active_cost = po_active["Grand Total"].sum() if not po_active.empty else 0.0
     tot_active_whs = tot_active_units * 6.99
     active_po_num = po_active.iloc[0]["PO Number"] if not po_active.empty else "None"
@@ -1263,7 +1264,7 @@ with tab_inventory:
     )
     pk2.metric(
         "Incoming Bags to Nabis",
-        f"{int(tot_active_units):,} Units",
+        f"+{int(tot_active_units):,} Bags",
         "+1,000 bags / SKU"
     )
     pk3.metric(
@@ -1280,11 +1281,12 @@ with tab_inventory:
     po_tab1, po_tab2 = st.tabs(["📋 Purchase Order Master Schedule", "🔍 Detailed SKU Breakdown by PO"])
     with po_tab1:
         styled_po_sum = po_summary.copy()
-        for c_curr in ["Unit COGS", "Production Cost", "Testing Fees", "Grand Total"]:
+        for c_curr in ["COGS / Bag", "Unit COGS", "Production Cost", "Testing Fees", "Grand Total"]:
             if c_curr in styled_po_sum.columns:
                 styled_po_sum[c_curr] = styled_po_sum[c_curr].apply(lambda x: f"${x:,.2f}")
-        if "Total Units" in styled_po_sum.columns:
-            styled_po_sum["Total Units"] = styled_po_sum["Total Units"].apply(lambda x: f"{int(x):,}")
+        for c_qty in ["Total Bags", "Total Units"]:
+            if c_qty in styled_po_sum.columns:
+                styled_po_sum[c_qty] = styled_po_sum[c_qty].apply(lambda x: f"{int(x):,}")
         st.dataframe(styled_po_sum, use_container_width=True, hide_index=True)
 
     with po_tab2:
@@ -1296,10 +1298,12 @@ with tab_inventory:
         )
         itemized_df = get_po_sku_breakdown_dataframe(po_choice)
         styled_itemized = itemized_df.copy()
-        if "Units Ordered" in styled_itemized.columns:
-            styled_itemized["Units Ordered"] = styled_itemized["Units Ordered"].apply(lambda x: f"{int(x):,}")
-        if "Unit Rate" in styled_itemized.columns:
-            styled_itemized["Unit Rate"] = styled_itemized["Unit Rate"].apply(lambda x: f"${x:,.2f}")
+        for c_qty in ["Bags Ordered", "Units Ordered"]:
+            if c_qty in styled_itemized.columns:
+                styled_itemized[c_qty] = styled_itemized[c_qty].apply(lambda x: f"{int(x):,}")
+        for c_rate in ["Rate / Bag", "Unit Rate"]:
+            if c_rate in styled_itemized.columns:
+                styled_itemized[c_rate] = styled_itemized[c_rate].apply(lambda x: f"${x:,.2f}")
         if "Line Total" in styled_itemized.columns:
             styled_itemized["Line Total"] = styled_itemized["Line Total"].apply(lambda x: f"${x:,.2f}")
         st.dataframe(styled_itemized, use_container_width=True, hide_index=True)
@@ -1525,17 +1529,30 @@ with tab_pnl:
                 ["All Accounts", "Income", "Cost of Goods Sold", "Expenses"],
                 key="gl_sec_filter",
             )
-            cols_2026 = [c for c in qbo_pnl_df.columns if "2026" in c]
-            display_cols = ["Section", "Account"] + cols_2026 + ["2026_YTD"]
+            monthly_2026 = [c for c in qbo_pnl_df.columns if "2026" in c and c != "2026_YTD"]
+            display_cols = ["Section", "Account"] + monthly_2026 + ["2026_YTD"]
             
             pnl_view = qbo_pnl_df.copy()
             if section_choice != "All Accounts":
                 pnl_view = pnl_view[pnl_view["Section"] == section_choice]
             
-            # Format currency columns
-            styled_pnl = pnl_view[display_cols].copy()
-            for col in cols_2026 + ["2026_YTD"]:
-                styled_pnl[col] = styled_pnl[col].apply(lambda v: f"${v:,.2f}" if abs(v) > 0.001 else "-")
+            def fmt_currency(val):
+                try:
+                    v = float(val)
+                    if pd.isna(v) or abs(v) < 0.001:
+                        return "-"
+                    if v < 0:
+                        return f"-${abs(v):,.2f}"
+                    return f"${v:,.2f}"
+                except (ValueError, TypeError):
+                    return "-"
+
+            # Format currency columns safely without duplicates
+            valid_pnl_cols = [c for c in display_cols if c in pnl_view.columns]
+            styled_pnl = pnl_view[valid_pnl_cols].copy()
+            for col in monthly_2026 + ["2026_YTD"]:
+                if col in styled_pnl.columns:
+                    styled_pnl[col] = styled_pnl[col].apply(fmt_currency)
             
             st.dataframe(styled_pnl, use_container_width=True, hide_index=True)
         else:
@@ -1587,10 +1604,11 @@ with tab_pnl:
     with gl_tab3:
         if not qbo_pnl_df.empty:
             st.markdown("#### Historical Performance Comparison: 2026 YTD vs. 2025 vs. All-Time")
-            hist_cols = ["Section", "Account", "2026_YTD", "2025_Total", "All_Time_Total"]
+            hist_cols = [c for c in ["Section", "Account", "2026_YTD", "2025_Total", "All_Time_Total"] if c in qbo_pnl_df.columns]
             styled_hist = qbo_pnl_df[hist_cols].copy()
             for col in ["2026_YTD", "2025_Total", "All_Time_Total"]:
-                styled_hist[col] = styled_hist[col].apply(lambda v: f"${v:,.2f}" if abs(v) > 0.001 else "-")
+                if col in styled_hist.columns:
+                    styled_hist[col] = styled_hist[col].apply(fmt_currency)
             st.dataframe(styled_hist, use_container_width=True, hide_index=True)
         else:
             st.info("P&L data not loaded.")

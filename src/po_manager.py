@@ -96,8 +96,8 @@ def get_po_summary_dataframe() -> pd.DataFrame:
             "Vendor": po["vendor"],
             "Order Date": po["order_date"],
             "Status": po["status"],
-            "Total Units": po["total_units"],
-            "Unit COGS": po["unit_cogs"],
+            "Total Bags": po["total_units"],
+            "COGS / Bag": po["unit_cogs"],
             "Production Cost": po["mfg_cost"],
             "Testing Fees": po["testing_fees"],
             "Grand Total": po["grand_total"],
@@ -119,8 +119,8 @@ def get_po_sku_breakdown_dataframe(po_number: Optional[str] = None) -> pd.DataFr
                 "Status": po["status"],
                 "Product Name": item["product_name"],
                 "SKU Code": item["sku"],
-                "Units Ordered": item["units"],
-                "Unit Rate": item["rate"],
+                "Bags Ordered": item["units"],
+                "Rate / Bag": item["rate"],
                 "Line Total": item["amount"],
             })
     return pd.DataFrame(rows)
