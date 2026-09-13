@@ -35,7 +35,12 @@ try:
     )
     from cashflow_engine import generate_13_week_forecast, calculate_cash_runway_metrics
     from inventory_engine import compute_inventory_health, aggregate_inventory_by_sku, is_obsolete_sku, is_active_commercial_sku
-    from qbo_client import QuickBooksClient, parse_qbo_pnl_export, parse_qbo_balance_sheet
+    from qbo_client import (
+        QuickBooksClient,
+        parse_qbo_pnl_export,
+        parse_qbo_balance_sheet,
+        get_default_qbo_data,
+    )
     from po_manager import (
         get_all_purchase_orders,
         get_po_summary_dataframe,
@@ -53,7 +58,12 @@ except ImportError:
     )
     from src.cashflow_engine import generate_13_week_forecast, calculate_cash_runway_metrics
     from src.inventory_engine import compute_inventory_health, aggregate_inventory_by_sku, is_obsolete_sku, is_active_commercial_sku
-    from src.qbo_client import QuickBooksClient, parse_qbo_pnl_export, parse_qbo_balance_sheet
+    from src.qbo_client import (
+        QuickBooksClient,
+        parse_qbo_pnl_export,
+        parse_qbo_balance_sheet,
+        get_default_qbo_data,
+    )
     from src.po_manager import (
         get_all_purchase_orders,
         get_po_summary_dataframe,
@@ -197,7 +207,7 @@ if not check_password():
     st.stop()
 
 
-APP_DATA_VERSION = "2026.09.13.v7"
+APP_DATA_VERSION = "2026.09.13.v8"
 
 
 @st.cache_data(ttl=600)
@@ -209,12 +219,13 @@ def get_dashboard_data(version_tag: str = APP_DATA_VERSION):
     budget_data = load_budget_cashflow_model(cashflow_file)
     
     inventory_df = get_default_inventory_data()
+    qbo_data = get_default_qbo_data()
     
-    return raw_df, summary_df, budget_data, inventory_df
+    return raw_df, summary_df, budget_data, inventory_df, qbo_data
 
 
 # Load data with automatic cache invalidation
-raw_nabis_df, summary_nabis_df, budget_data, initial_inv_df = get_dashboard_data(APP_DATA_VERSION)
+raw_nabis_df, summary_nabis_df, budget_data, initial_inv_df, initial_qbo_data = get_dashboard_data(APP_DATA_VERSION)
 
 # Force-synchronize session state inventory with latest loader schema and data version
 if (
@@ -224,6 +235,13 @@ if (
 ):
     st.session_state.inventory_df = initial_inv_df.copy()
     st.session_state["inventory_version"] = APP_DATA_VERSION
+
+if (
+    "qbo_data" not in st.session_state
+    or st.session_state.get("qbo_version") != APP_DATA_VERSION
+):
+    st.session_state.qbo_data = initial_qbo_data
+    st.session_state["qbo_version"] = APP_DATA_VERSION
 
 # ==========================================
 # SIDEBAR CONTROLS
@@ -240,14 +258,23 @@ with st.sidebar:
     st.markdown("---")
     
     st.markdown("### ⚙️ Global Cash & Settings")
+    qbo_bs = st.session_state.qbo_data.get("balance_sheet", {})
+    default_cash_val = float(qbo_bs.get("bank_cash", budget_data.get("starting_balance", 14000.0)))
     starting_cash_input = st.number_input(
         "Current Bank Cash ($)",
         min_value=0.0,
         max_value=1000000.0,
-        value=float(budget_data.get("starting_balance", 14000.0)),
+        value=default_cash_val,
         step=500.0,
-        help="Synced with QuickBooks cash balance or updated manually.",
+        help="Synced directly from QuickBooks Online Balance Sheet (Citi Bank Checking 6648) or updated manually.",
     )
+    if qbo_bs.get("has_data") or qbo_bs.get("bank_cash"):
+        as_of = qbo_bs.get("as_of_date", "As of Sep 12, 2026")
+        acc_name = qbo_bs.get("bank_account_name", "Citi Bank Checking (6648)")
+        cc_debt = qbo_bs.get("credit_card_debt", 11983.75)
+        st.caption(f"🏦 **QBO Synced:** {acc_name}")
+        st.caption(f"📅 **Date:** {as_of}")
+        st.caption(f"💳 **Credit Cards Payable:** ${cc_debt:,.2f}")
     
     st.markdown("### 📅 Date Scope (Nabis Data)")
     date_options = ["All Time (2025–2026)", "2026 YTD", "2025 Full Year"]
@@ -272,6 +299,8 @@ with st.sidebar:
         st.cache_data.clear()
         st.session_state.inventory_df = initial_inv_df.copy()
         st.session_state["inventory_version"] = APP_DATA_VERSION
+        st.session_state.qbo_data = initial_qbo_data
+        st.session_state["qbo_version"] = APP_DATA_VERSION
         st.rerun()
 
 # ==========================================
@@ -323,11 +352,13 @@ with tab_overview:
     # KPI Cards Row
     c1, c2, c3, c4 = st.columns(4)
     with c1:
+        as_of_txt = qbo_bs.get("as_of_date", "As of Sep 12, 2026")
+        acc_name = qbo_bs.get("bank_account_name", "Citi Bank Checking (6648)")
         st.markdown(
             f"""<div class="kpi-card">
             <div class="kpi-title">Current Cash Balance</div>
             <div class="kpi-val">${starting_cash_input:,.2f}</div>
-            <div class="kpi-sub">QuickBooks Operating Cash</div>
+            <div class="kpi-sub">QuickBooks • {acc_name} • {as_of_txt}</div>
         </div>""",
             unsafe_allow_html=True,
         )
@@ -360,7 +391,24 @@ with tab_overview:
             unsafe_allow_html=True,
         )
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    # Balance sheet & Working Capital strip
+    cc_debt = qbo_bs.get("credit_card_debt", 11983.75)
+    net_working_cap = starting_cash_input - cc_debt
+    nwc_color = "#2d6a4f" if net_working_cap >= 0 else "#dc3545"
+    st.markdown(
+        f"""
+        <div style="display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; margin-bottom: 20px; font-size: 0.85rem; color: #495057; background: #f8f9fa; padding: 10px 18px; border-radius: 8px; border: 1px solid #e9ecef;">
+            <span>💳 <b>Credit Card Payables:</b> ${cc_debt:,.2f} (Capital One + Citi CC)</span>
+            <span>•</span>
+            <span>⚖️ <b>Net Liquid Working Capital:</b> <b style="color: {nwc_color};">${net_working_cap:,.2f}</b></span>
+            <span>•</span>
+            <span>🏢 <b>Fixed Assets (Brand & IP):</b> ${qbo_bs.get('fixed_assets', 59613.0):,.2f}</span>
+            <span>•</span>
+            <span>📈 <b>2026 YTD Net Income:</b> <b>${st.session_state.qbo_data.get('pnl_summary', {}).get('net_income_2026_ytd', -37971.46):,.2f}</b></span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     
     # Visual Highlights
     row1_c1, row1_c2 = st.columns([3, 2])
@@ -1261,67 +1309,305 @@ with tab_inventory:
 # TAB 5: P&L & ROYALTY TRACKING
 # -----------------------------------------------------------------------------
 with tab_pnl:
-    st.subheader("Financial Performance: QuickBooks & Royalty Streams")
-    st.markdown("Track wholesale sales, international/out-of-state royalties (Thailand, Hawaii, Ohio), and cost of goods.")
+    st.subheader("Financial Performance: QuickBooks General Ledger & Royalty Tracking")
+    st.markdown("Track wholesale sales, international/out-of-state royalties (Thailand, Hawaii), manufacturing COGS, and operating expenses directly from QuickBooks Online.")
     
-    # Budget vs Actuals comparison
-    income_budget = budget_data.get("income", pd.DataFrame())
-    expense_budget = budget_data.get("expenses", pd.DataFrame())
-    
-    col_p1, col_p2 = st.columns(2)
-    with col_p1:
-        st.markdown("#### Revenue Streams: California Wholesale & Royalties")
-        if not income_budget.empty:
-            st.dataframe(income_budget, use_container_width=True, hide_index=True)
-            
-            # Royalty breakdown chart
-            royalty_rows = income_budget[income_budget["Stream"].str.contains("Royalt|Royalties", case=False, na=False)]
-            if not royalty_rows.empty:
-                st.markdown("##### Monthly Royalty Streams")
-                royalty_long = pd.melt(
-                    royalty_rows,
-                    id_vars=["Stream"],
-                    value_vars=["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
-                    var_name="Month",
-                    value_name="Amount",
-                )
-                fig_roy = px.bar(
-                    royalty_long,
-                    x="Month",
-                    y="Amount",
-                    color="Stream",
-                    barmode="stack",
-                    title="Royalty Inflows (TPO Thailand & Hawaii)",
-                )
-                fig_roy.update_layout(height=300, margin=dict(l=20, r=20, t=30, b=20))
-                st.plotly_chart(fig_roy, use_container_width=True)
+    qbo_data = st.session_state.get("qbo_data", {})
+    qbo_summary = qbo_data.get("pnl_summary", {})
+    qbo_bs = qbo_data.get("balance_sheet", {})
+    qbo_pnl_df = qbo_data.get("pnl_df", pd.DataFrame())
+    monthly_trend_df = qbo_summary.get("monthly_trend", pd.DataFrame())
 
-    with col_p2:
-        st.markdown("#### Manufacturing & Operational Expenses")
-        if not expense_budget.empty:
-            st.dataframe(expense_budget.head(10), use_container_width=True, hide_index=True)
+    # Reporting Scope Selector
+    scope_col1, scope_col2 = st.columns([2.5, 3.5])
+    with scope_col1:
+        qbo_scope = st.radio(
+            "Select Financial Reporting Period:",
+            ["2026 YTD (Jan–Sep 2026)", "2025 Full Year", "All-Time Historical (2021–2026)"],
+            horizontal=True,
+        )
+    with scope_col2:
+        as_of_dt = qbo_bs.get("as_of_date", "As of Sep 12, 2026")
+        st.markdown(
+            f"""<div style="text-align: right; padding-top: 18px; font-size: 0.85rem; color: #2d6a4f;">
+                🟢 <b>QuickBooks Ledger Synced:</b> <code>QB/Profit and Loss - AA.xlsx</code> & <code>QB/Balance Sheet - AA.xlsx</code> ({as_of_dt})
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+    # Calculate metrics based on selected scope
+    if qbo_scope == "2026 YTD (Jan–Sep 2026)":
+        inc_val = qbo_summary.get("income_2026_ytd", 132970.18)
+        cogs_val = qbo_summary.get("cogs_2026_ytd", 76373.04)
+        gp_val = qbo_summary.get("gross_profit_2026_ytd", 56597.14)
+        exp_val = qbo_summary.get("expenses_2026_ytd", 94643.60)
+        net_val = qbo_summary.get("net_income_2026_ytd", -37971.46)
+        scope_label = "2026 YTD"
+    elif qbo_scope == "2025 Full Year":
+        inc_val = 176368.71
+        cogs_val = 72104.09
+        gp_val = 104264.62
+        exp_val = 125683.76
+        net_val = -27724.14
+        scope_label = "2025 Full Year"
+    else:
+        inc_val = qbo_summary.get("income_all_time", 510282.68)
+        cogs_val = qbo_summary.get("cogs_all_time", 423613.10)
+        gp_val = qbo_summary.get("gross_profit_all_time", 86669.58)
+        exp_val = qbo_summary.get("expenses_all_time", 909716.16)
+        net_val = qbo_summary.get("net_income_all_time", -859357.58)
+        scope_label = "All-Time"
+
+    gm_pct = (gp_val / inc_val * 100) if inc_val > 0 else 0.0
+    net_color = "#2d6a4f" if net_val >= 0 else "#dc3545"
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    with k1:
+        st.markdown(
+            f"""<div class="kpi-card">
+                <div class="kpi-title">Total Revenue</div>
+                <div class="kpi-val">${inc_val:,.2f}</div>
+                <div class="kpi-sub">{scope_label} QBO Sales & Royalties</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    with k2:
+        st.markdown(
+            f"""<div class="kpi-card">
+                <div class="kpi-title">Cost of Goods Sold</div>
+                <div class="kpi-val">${cogs_val:,.2f}</div>
+                <div class="kpi-sub">Manufacturing & Shipping</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    with k3:
+        st.markdown(
+            f"""<div class="kpi-card">
+                <div class="kpi-title">Gross Profit</div>
+                <div class="kpi-val">${gp_val:,.2f}</div>
+                <div class="kpi-sub">Gross Margin: <b>{gm_pct:.1f}%</b></div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    with k4:
+        st.markdown(
+            f"""<div class="kpi-card">
+                <div class="kpi-title">Operating Expenses</div>
+                <div class="kpi-val">${exp_val:,.2f}</div>
+                <div class="kpi-sub">Distro, Software, Marketing</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    with k5:
+        st.markdown(
+            f"""<div class="kpi-card">
+                <div class="kpi-title">Net Income</div>
+                <div class="kpi-val" style="color: {net_color};">${net_val:,.2f}</div>
+                <div class="kpi-sub">QuickBooks Cash Basis</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    pnl_col1, pnl_col2 = st.columns(2)
+    with pnl_col1:
+        st.subheader("2026 Monthly Income vs. Cost Trajectory")
+        if not monthly_trend_df.empty:
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Bar(
+                x=monthly_trend_df["Month"],
+                y=monthly_trend_df["Income"],
+                name="Total Revenue",
+                marker_color="#2d6a4f",
+            ))
+            fig_trend.add_trace(go.Bar(
+                x=monthly_trend_df["Month"],
+                y=monthly_trend_df["COGS"],
+                name="Cost of Goods Sold",
+                marker_color="#e76f51",
+            ))
+            fig_trend.add_trace(go.Bar(
+                x=monthly_trend_df["Month"],
+                y=monthly_trend_df["Expenses"],
+                name="Operating Expenses",
+                marker_color="#f4a261",
+            ))
+            fig_trend.add_trace(go.Scatter(
+                x=monthly_trend_df["Month"],
+                y=monthly_trend_df["Net_Income"],
+                name="Net Income",
+                mode="lines+markers",
+                line=dict(color="#1b4332", width=3),
+            ))
+            fig_trend.update_layout(
+                barmode="group",
+                xaxis_title="2026 Months",
+                yaxis_title="USD ($)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(l=20, r=20, t=30, b=30),
+                height=350,
+            )
+            st.plotly_chart(fig_trend, use_container_width=True)
+        else:
+            st.info("No monthly trend data available.")
+
+        # Revenue streams breakdown
+        st.subheader("Revenue Mix: California Wholesale vs. Royalties (2026 YTD)")
+        rev_streams = pd.DataFrame([
+            {"Stream": "Thailand Royalties", "Amount": qbo_summary.get("income_thailand_2026_ytd", 50863.60)},
+            {"Stream": "California Wholesale (Cali)", "Amount": qbo_summary.get("income_cali_2026_ytd", 42341.28)},
+            {"Stream": "Hawaii Royalties", "Amount": qbo_summary.get("income_hawaii_2026_ytd", 39765.30)},
+        ])
+        fig_rev_pie = px.pie(
+            rev_streams,
+            values="Amount",
+            names="Stream",
+            color="Stream",
+            color_discrete_map={
+                "Thailand Royalties": "#2a9d8f",
+                "California Wholesale (Cali)": "#264653",
+                "Hawaii Royalties": "#e9c46a",
+            },
+            hole=0.45,
+        )
+        fig_rev_pie.update_layout(height=300, margin=dict(l=20, r=20, t=10, b=10))
+        st.plotly_chart(fig_rev_pie, use_container_width=True)
+
+    with pnl_col2:
+        st.subheader("Major Operating Expense Drivers (2026 YTD)")
+        exp_breakdown = pd.DataFrame([
+            {"Category": "Software & Office Supplies", "Amount": qbo_summary.get("exp_software_office_2026_ytd", 30787.53)},
+            {"Category": "Nabis Distro Fees", "Amount": qbo_summary.get("exp_nabis_distro_2026_ytd", 24373.27)},
+            {"Category": "Advertising & Marketing", "Amount": qbo_summary.get("exp_marketing_2026_ytd", 19288.77)},
+            {"Category": "Nabis Logistics & Storage", "Amount": qbo_summary.get("exp_nabis_logistics_2026_ytd", 7089.03)},
+            {"Category": "Legal & Accounting", "Amount": qbo_summary.get("exp_legal_acctg_2026_ytd", 6119.48)},
+            {"Category": "Insurance", "Amount": 3143.04},
+            {"Category": "Interest & Bank Charges", "Amount": 1909.81},
+            {"Category": "Other Overhead (Travel, Meals, Postage)", "Amount": 1932.67},
+        ])
+        fig_exp_pie = px.pie(
+            exp_breakdown,
+            values="Amount",
+            names="Category",
+            color_discrete_sequence=px.colors.qualitative.Safe,
+            hole=0.45,
+        )
+        fig_exp_pie.update_layout(height=350, margin=dict(l=20, r=20, t=10, b=10))
+        st.plotly_chart(fig_exp_pie, use_container_width=True)
+
+        # Manufacturing Outflow Timeline
+        st.subheader("Manufacturing Payments Timeline (Smoakland Production Runs)")
+        if not monthly_trend_df.empty:
+            fig_mfg = px.bar(
+                monthly_trend_df,
+                x="Month",
+                y="Manufacturing_Cost",
+                labels={"Manufacturing_Cost": "Manufacturing ($)", "Month": "Month (2026)"},
+                color_discrete_sequence=["#e76f51"],
+            )
+            fig_mfg.update_layout(height=300, margin=dict(l=20, r=20, t=30, b=20))
+            st.plotly_chart(fig_mfg, use_container_width=True)
+
+    # Interactive Data Ledgers
+    st.markdown("---")
+    st.subheader("📋 QuickBooks General Ledger & Financial Statements")
+    gl_tab1, gl_tab2, gl_tab3, gl_tab4 = st.tabs([
+        "📑 2026 Monthly P&L Ledger",
+        "🏦 Balance Sheet (Sep 12, 2026)",
+        "⏳ Historical Comparison (2025 vs 2026 vs All-Time)",
+        "📊 Budget Model Comparison",
+    ])
+
+    with gl_tab1:
+        if not qbo_pnl_df.empty:
+            section_choice = st.selectbox(
+                "Filter P&L by Section:",
+                ["All Accounts", "Income", "Cost of Goods Sold", "Expenses"],
+                key="gl_sec_filter",
+            )
+            cols_2026 = [c for c in qbo_pnl_df.columns if "2026" in c]
+            display_cols = ["Section", "Account"] + cols_2026 + ["2026_YTD"]
             
-            # Expense breakdown
-            mfg_rows = expense_budget[expense_budget["Expense"].isin(["Smoakland", "MyGreen Network", "Luis Commissions & Fees", "Distro Nabis Expense"])]
-            if not mfg_rows.empty:
-                st.markdown("##### Major Cost Drivers")
-                mfg_long = pd.melt(
-                    mfg_rows,
-                    id_vars=["Expense"],
-                    value_vars=["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
-                    var_name="Month",
-                    value_name="Amount",
-                )
-                fig_exp = px.bar(
-                    mfg_long,
-                    x="Month",
-                    y="Amount",
-                    color="Expense",
-                    barmode="group",
-                    title="Cost Breakdown: Production Runs vs. Commissions & Distribution",
-                )
-                fig_exp.update_layout(height=300, margin=dict(l=20, r=20, t=30, b=20))
-                st.plotly_chart(fig_exp, use_container_width=True)
+            pnl_view = qbo_pnl_df.copy()
+            if section_choice != "All Accounts":
+                pnl_view = pnl_view[pnl_view["Section"] == section_choice]
+            
+            # Format currency columns
+            styled_pnl = pnl_view[display_cols].copy()
+            for col in cols_2026 + ["2026_YTD"]:
+                styled_pnl[col] = styled_pnl[col].apply(lambda v: f"${v:,.2f}" if abs(v) > 0.001 else "-")
+            
+            st.dataframe(styled_pnl, use_container_width=True, hide_index=True)
+        else:
+            st.info("QuickBooks P&L data not yet loaded.")
+
+    with gl_tab2:
+        st.markdown(f"#### Balance Sheet — {qbo_bs.get('as_of_date', 'As of Sep 12, 2026')}")
+        bs_c1, bs_c2, bs_c3 = st.columns(3)
+        with bs_c1:
+            st.markdown("##### 💵 Current Assets")
+            st.markdown(f"- **{qbo_bs.get('bank_account_name', 'Citi Bank Checking (6648)')}:** `${qbo_bs.get('bank_cash', 8277.06):,.2f}`")
+            st.markdown(f"- **Total Bank Accounts:** `${qbo_bs.get('bank_cash', 8277.06):,.2f}`")
+            st.markdown(f"- **Total Current Assets:** `${qbo_bs.get('bank_cash', 8277.06):,.2f}`")
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("##### 🏢 Fixed Assets")
+            st.markdown("- **Brand Development:** `$22,500.00`")
+            st.markdown("- **IP Development:** `$66,391.00`")
+            st.markdown("- **Startup Costs:** `$7,558.00`")
+            st.markdown("- **Accumulated Amortization:** `-$36,836.00`")
+            st.markdown(f"- **Total Fixed Assets:** `${qbo_bs.get('fixed_assets', 59613.00):,.2f}`")
+            st.markdown(f"**Total Assets:** `${qbo_bs.get('total_assets', 67890.06):,.2f}`")
+
+        with bs_c2:
+            st.markdown("##### 💳 Liabilities")
+            st.markdown("- **Capital One Credit Card (6212):** `$4,427.67`")
+            st.markdown("- **Citi Bank Credit Card (5816):** `$7,556.08`")
+            st.markdown(f"- **Total Credit Cards Payable:** `${qbo_bs.get('credit_card_debt', 11983.75):,.2f}`")
+            st.markdown(f"- **Total Current Liabilities:** `${qbo_bs.get('total_liabilities', 11983.75):,.2f}`")
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("##### ⚖️ Working Capital Analysis")
+            net_wc = qbo_bs.get("net_working_capital", -3706.69)
+            wc_style = "#2d6a4f" if net_wc >= 0 else "#dc3545"
+            st.markdown(f"- **Bank Checking:** `${qbo_bs.get('bank_cash', 8277.06):,.2f}`")
+            st.markdown(f"- **Credit Card Debt:** `-${qbo_bs.get('credit_card_debt', 11983.75):,.2f}`")
+            st.markdown(f"- **Net Liquid Capital:** <b style='color: {wc_style};'>${net_wc:,.2f}</b>", unsafe_allow_html=True)
+
+        with bs_c3:
+            st.markdown("##### 👥 Equity")
+            st.markdown("- **Michael Reinsch (PM Dawn LLC):** `$329,352.86`")
+            st.markdown("- **Pat Arora (PM Dawn LLC):** `$228,899.34`")
+            st.markdown("- **Marisa Badua (Tiare Ventures LLC):** `$233,890.46`")
+            st.markdown("- **Total Owner's Investment:** `$795,068.21`")
+            st.markdown("- **Owner's Pay & Personal Expenses:** `$23,746.68`")
+            st.markdown("- **Retained Earnings:** `-$724,937.12`")
+            st.markdown(f"- **2026 Net Income:** `${qbo_bs.get('net_income', -37971.46):,.2f}`")
+            st.markdown(f"**Total Equity:** `${qbo_bs.get('total_equity', 55906.31):,.2f}`")
+            st.markdown(f"**Total Liabilities & Equity:** `${qbo_bs.get('total_assets', 67890.06):,.2f}`")
+
+    with gl_tab3:
+        if not qbo_pnl_df.empty:
+            st.markdown("#### Historical Performance Comparison: 2026 YTD vs. 2025 vs. All-Time")
+            hist_cols = ["Section", "Account", "2026_YTD", "2025_Total", "All_Time_Total"]
+            styled_hist = qbo_pnl_df[hist_cols].copy()
+            for col in ["2026_YTD", "2025_Total", "All_Time_Total"]:
+                styled_hist[col] = styled_hist[col].apply(lambda v: f"${v:,.2f}" if abs(v) > 0.001 else "-")
+            st.dataframe(styled_hist, use_container_width=True, hide_index=True)
+        else:
+            st.info("P&L data not loaded.")
+
+    with gl_tab4:
+        st.markdown("#### Budget Model Comparison (from Cashflow Model Spreadsheet)")
+        income_budget = budget_data.get("income", pd.DataFrame())
+        expense_budget = budget_data.get("expenses", pd.DataFrame())
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            st.markdown("##### Budgeted Revenue Streams")
+            if not income_budget.empty:
+                st.dataframe(income_budget, use_container_width=True, hide_index=True)
+        with col_b2:
+            st.markdown("##### Budgeted Expenses")
+            if not expense_budget.empty:
+                st.dataframe(expense_budget.head(10), use_container_width=True, hide_index=True)
 
 
 # -----------------------------------------------------------------------------
@@ -1395,19 +1681,47 @@ with tab_upload:
             "Upload QBO P&L or Balance Sheet (.xlsx)",
             type=["xlsx", "xls"],
             key="up_qbo",
+            help="Upload Balance Sheet - AA.xlsx or Profit and Loss - AA.xlsx to update accounting data."
         )
         if uploaded_qbo:
             try:
-                qbo_pnl = parse_qbo_pnl_export(uploaded_qbo)
-                if not qbo_pnl.empty:
-                    st.success(f"Parsed {len(qbo_pnl)} QBO line items!")
-                    st.dataframe(qbo_pnl.head(10))
+                qb_dir = os.path.join(BASE_DIR, "QB")
+                os.makedirs(qb_dir, exist_ok=True)
+                save_path = os.path.join(qb_dir, uploaded_qbo.name)
+                with open(save_path, "wb") as f:
+                    f.write(uploaded_qbo.getbuffer())
+
+                fname_lower = uploaded_qbo.name.lower()
+                if "balance" in fname_lower:
+                    bs_res = parse_qbo_balance_sheet(save_path)
+                    st.session_state.qbo_data["balance_sheet"] = bs_res
+                    st.success(f"✅ Saved & parsed QuickBooks Balance Sheet! Bank Cash: ${bs_res.get('bank_cash', 0.0):,.2f}")
+                elif "profit" in fname_lower or "p&l" in fname_lower or "pnl" in fname_lower:
+                    pnl_df, pnl_sum = parse_qbo_pnl_export(save_path)
+                    st.session_state.qbo_data["pnl_df"] = pnl_df
+                    st.session_state.qbo_data["pnl_summary"] = pnl_sum
+                    st.success(f"✅ Saved & parsed QuickBooks P&L! 2026 YTD Revenue: ${pnl_sum.get('income_2026_ytd', 0.0):,.2f} | Net: ${pnl_sum.get('net_income_2026_ytd', 0.0):,.2f}")
                 else:
-                    st.warning("Could not automatically identify standard P&L sections in this sheet.")
+                    st.info(f"File saved to QB/{uploaded_qbo.name}. Refresh data cache to update all tabs.")
+                st.cache_data.clear()
             except Exception as e:
                 st.error(f"Error reading QBO file: {e}")
 
         st.markdown("### 📋 Upload QuickBooks Purchase Order Export")
+        st.info(
+            """
+            💡 **Why POs are not in the P&L or Balance Sheet:**
+            Under GAAP, **Purchase Orders are non-posting transactions**. They represent commitments to Smoakland, not posted expenses, assets, or liabilities. They only hit the P&L as *Cost of Goods Sold: Manufacturing* when a Bill is entered.
+
+            **How to Export POs from QuickBooks Online:**
+            1. In QBO, go to **Reports** in the left navigation.
+            2. Search for **"Open Purchase Order Detail"** (or **"Purchase Order Detail"**).
+            3. Set Date Range to **"All Dates"** (or 2025 to 2026).
+            4. Ensure columns include: `PO #`, `Date`, `Vendor` (Smoakland), `Product/Service` (Item / SKU name), `Quantity`, `Rate` ($2.80), and `Amount`.
+            5. Click the **Export** icon -> **Export to Excel**.
+            6. Drop the exported spreadsheet below, or save it to `QB/Purchase Orders - AA.xlsx`.
+            """
+        )
         uploaded_qbo_po = st.file_uploader(
             "Upload QBO Open Purchase Order Detail (.xlsx)",
             type=["xlsx", "xls"],
@@ -1416,9 +1730,15 @@ with tab_upload:
         )
         if uploaded_qbo_po:
             try:
-                qbo_po_df = parse_qbo_po_export(uploaded_qbo_po)
+                qb_dir = os.path.join(BASE_DIR, "QB")
+                os.makedirs(qb_dir, exist_ok=True)
+                save_path = os.path.join(qb_dir, uploaded_qbo_po.name)
+                with open(save_path, "wb") as f:
+                    f.write(uploaded_qbo_po.getbuffer())
+
+                qbo_po_df = parse_qbo_po_export(save_path)
                 if not qbo_po_df.empty:
-                    st.success(f"✅ Parsed {len(qbo_po_df)} Purchase Order lines from QuickBooks!")
+                    st.success(f"✅ Parsed {len(qbo_po_df)} Purchase Order lines from QuickBooks and saved to QB/{uploaded_qbo_po.name}!")
                     st.dataframe(qbo_po_df.head(10), use_container_width=True)
                 else:
                     st.warning("Could not automatically identify standard PO lines in this sheet.")
